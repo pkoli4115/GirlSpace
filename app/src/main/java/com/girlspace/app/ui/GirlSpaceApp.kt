@@ -8,6 +8,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.girlspace.app.ui.billing.PremiumScreen
+import com.girlspace.app.ui.groups.GroupChatScreen
 import com.girlspace.app.ui.home.HomeRoot
 import com.girlspace.app.ui.login.LoginScreen
 import com.girlspace.app.ui.onboarding.MoodOnboardingScreen
@@ -86,6 +87,7 @@ fun GirlSpaceApp() {
             ---------------------------------------------------- */
             composable(route = "home_root") {
                 HomeRoot(
+                    navController = navController,
                     onLogout = {
                         navController.navigate("login") {
                             popUpTo("home_root") { inclusive = true }
@@ -123,6 +125,22 @@ fun GirlSpaceApp() {
                     onUpgrade = {
                         navController.navigate("premium")
                     }
+                )
+            }
+
+            /* ---------------------------------------------------
+                7) GROUP CHAT SCREEN
+            ---------------------------------------------------- */
+            composable(
+                route = "group_chat/{groupId}/{groupName}"
+            ) { backStackEntry ->
+                val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
+                val groupName = backStackEntry.arguments?.getString("groupName") ?: "Group"
+
+                GroupChatScreen(
+                    navController = navController,
+                    groupId = groupId,
+                    groupName = groupName
                 )
             }
         }

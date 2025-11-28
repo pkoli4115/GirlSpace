@@ -1,34 +1,32 @@
 package com.girlspace.app.ui.home
 
-import com.girlspace.app.ui.feed.FeedScreen
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.ui.unit.dp
-import androidx.compose.foundation.layout.Column
-import android.app.Activity
-import android.util.Log
-import android.widget.Toast
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Group
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
-import com.facebook.login.LoginManager
-import com.girlspace.app.R
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
-import com.google.firebase.auth.FirebaseAuth
-
+import androidx.navigation.NavHostController
+import com.girlspace.app.ui.chat.ChatsScreen
+import com.girlspace.app.ui.feed.FeedScreen
+import com.girlspace.app.ui.groups.GroupsScreen
 
 enum class HomeTab {
     Feed, Reels, Chats, Groups, Profile
@@ -36,11 +34,11 @@ enum class HomeTab {
 
 @Composable
 fun HomeRoot(
-    onLogout: () -> Unit,
-    onUpgrade: () -> Unit,
-    onOpenProfile: () -> Unit
+    navController: NavHostController,
+    onLogout: () -> Unit,       // reserved for future use (e.g. header menu)
+    onUpgrade: () -> Unit,      // used by Groups + Profile → PremiumScreen
+    onOpenProfile: () -> Unit   // opens full ProfileScreen route
 ) {
-
     var currentTab by remember { mutableStateOf(HomeTab.Feed) }
     var showCreatePost by remember { mutableStateOf(false) }
 
@@ -71,17 +69,11 @@ fun HomeRoot(
                     icon = { Icon(Icons.Filled.Group, contentDescription = "Groups") },
                     label = { Text("Groups") }
                 )
-
-                /** -------------------------------
-                 *  🔥 NEW: FULL PROFILE SCREEN NAVIGATION
-                 *  (instead of mini internal ProfileTab)
-                 *  -------------------------------- */
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Profile,
                     onClick = {
                         currentTab = HomeTab.Profile
-
-                        // Navigate outside HomeRoot → Full ProfileScreen
+                        // Navigate to full ProfileScreen outside HomeRoot
                         onOpenProfile()
                     },
                     icon = { Icon(Icons.Filled.Person, contentDescription = "Profile") },
@@ -89,7 +81,6 @@ fun HomeRoot(
                 )
             }
         },
-
         floatingActionButton = {
             if (currentTab == HomeTab.Feed) {
                 FloatingActionButton(
@@ -112,20 +103,23 @@ fun HomeRoot(
                 )
 
                 HomeTab.Reels -> ReelsTab()
-                HomeTab.Chats -> ChatsTab()
-                HomeTab.Groups -> GroupsTab()
 
-                /**
-                 * ✅ Profile Tab: DO NOTHING HERE
-                 * It immediately navigates out of HomeRoot
-                 * → Full ProfileScreen()
-                 */
-                HomeTab.Profile -> {}
+                HomeTab.Chats -> ChatsTab()
+
+                HomeTab.Groups -> GroupsScreen(
+                    navController = navController,
+                    onUpgrade = onUpgrade
+                )
+
+
+                // Profile tab just triggers navigation via onOpenProfile()
+                HomeTab.Profile -> {
+                    // Intentionally empty – content comes from NavGraph "profile" route
+                }
             }
         }
     }
 }
-
 
 @Composable
 private fun ReelsTab() {
@@ -139,20 +133,6 @@ private fun ReelsTab() {
 
 @Composable
 private fun ChatsTab() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("Chats coming soon…")
-    }
-}
-
-@Composable
-private fun GroupsTab() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("Groups coming soon…")
-    }
+    // Use the real ChatsScreen instead of placeholder text
+    ChatsScreen()
 }
