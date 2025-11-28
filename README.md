@@ -1,0 +1,3 @@
+# GirlSpace App Setup Guide
+
+Follow these steps to configure Firebase, AdMob, and Play Billing...

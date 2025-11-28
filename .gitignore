@@ -1,0 +1,48 @@
+# Gradle
+.gradle/
+build/
+*/build/
+!gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Android build
+app/release/
+app/debug/
+
+# Keystores (NEVER COMMIT)
+*.jks
+*.keystore
+Keys/
+
+# Local config
+local.properties
+local
+google-services.json
+firebase_app_id.json
+*.env
+
+# Firebase
+.firebase/
+.firebaserc
+firebase-debug.log
+
+# Logs
+*.log
+
+# Profiling dumps
+*.hprof
+
+# Release artifacts
+*.apk
+*.aab
+*.ipa
+*.zip
+
+# Temporary
+*.tmp
+*.temp
+Keys

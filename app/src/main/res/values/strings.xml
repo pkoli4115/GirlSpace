@@ -1,0 +1,31 @@
+<resources>
+    <!-- ===== App Info ===== -->
+    <string name="app_name">GirlSpace</string>
+
+    <!-- ===========================================================
+         ✅ GOOGLE SIGN-IN
+         ===========================================================
+         Normally, the google-services plugin adds this automatically
+         from app/google-services.json as:
+            <string name="default_web_client_id">…</string>
+
+         If you still get "Unresolved reference 'default_web_client_id'"
+         after syncing, you can keep this manual fallback value.
+         This works for both debug and release builds as long as
+         Firebase has both SHA-1 fingerprints registered.
+    -->
+    <string name="default_web_client_id">
+        786594993065-gs6s74n0ac093ee2pfqarspf1pebi429.apps.googleusercontent.com
+    </string>
+
+   -->
+    <string name="facebook_app_id">1525498155300902</string>
+    <string name="facebook_client_token">ddee3300f8269bf5f8bb3fd59bac62c0</string>
+
+    <!-- ===========================================================
+         ✅ LEGAL LINKS (optional UI references)
+         =========================================================== -->
+    <string name="privacy_policy_url">https://pkoli4115.github.io/GirlSpace/privacy.html</string>
+    <string name="terms_of_service_url">https://pkoli4115.github.io/GirlSpace/terms.html</string>
+    <string name="data_deletion_url">https://pkoli4115.github.io/GirlSpace/delete.html</string>
+</resources>

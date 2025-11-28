@@ -1,0 +1,211 @@
+[
+  {
+    "authorId": "user_aarav",
+    "authorName": "Aarav",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/52.jpg",
+    "text": "Sunrise trek today. Nothing beats the peace at the top. #travel #mountains",
+    "imageUrl": "https://images.unsplash.com/photo-1501785888041-af3ef285b470",
+    "createdAt": 1731800010000,
+    "likeCount": 129,
+    "commentCount": 11
+  },
+  {
+    "authorId": "user_aarav",
+    "authorName": "Aarav",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/52.jpg",
+    "text": "City lights + long drive = perfect combo. #wanderer",
+    "imageUrl": "https://images.unsplash.com/photo-1521295121783-8a321d551ad2",
+    "createdAt": 1731803510000,
+    "likeCount": 249,
+    "commentCount": 21
+  },
+
+  {
+    "authorId": "user_trisha",
+    "authorName": "Trisha",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/65.jpg",
+    "text": "Glow day 🌸 Skincare + coffee = happiness. #selfcare",
+    "imageUrl": "https://images.unsplash.com/photo-1522335789203-aabd1fc54bc9",
+    "createdAt": 1731810012000,
+    "likeCount": 340,
+    "commentCount": 35
+  },
+  {
+    "authorId": "user_trisha",
+    "authorName": "Trisha",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/65.jpg",
+    "text": "Weekend shoot ready! Loving this natural light today. ✨",
+    "imageUrl": "https://images.unsplash.com/photo-1517841905240-472988babdf9",
+    "createdAt": 1731812512000,
+    "likeCount": 212,
+    "commentCount": 19
+  },
+
+  {
+    "authorId": "user_sam",
+    "authorName": "Sam",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/34.jpg",
+    "text": "Pushing limits every single day. #fitnessmotivation",
+    "imageUrl": "https://images.unsplash.com/photo-1558611848-73f7eb4001a1",
+    "createdAt": 1731817410000,
+    "likeCount": 512,
+    "commentCount": 44
+  },
+  {
+    "authorId": "user_sam",
+    "authorName": "Sam",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/34.jpg",
+    "text": "Protein bowls post workout. Fuel right. 💪",
+    "imageUrl": "https://images.unsplash.com/photo-1559592505-c43d3cffd1c1",
+    "createdAt": 1731820010000,
+    "likeCount": 410,
+    "commentCount": 22
+  },
+
+  {
+    "authorId": "user_meera",
+    "authorName": "Meera",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/71.jpg",
+    "text": "Special masala dosa today 😋 Recipe dropping soon! #homemade",
+    "imageUrl": "https://images.unsplash.com/photo-1604908553725-54d21003a5ea",
+    "createdAt": 1731822210000,
+    "likeCount": 275,
+    "commentCount": 15
+  },
+  {
+    "authorId": "user_meera",
+    "authorName": "Meera",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/71.jpg",
+    "text": "Sunday thali ❤️ Comfort food at its best.",
+    "imageUrl": "https://images.unsplash.com/photo-1601050690597-1dd3553a37db",
+    "createdAt": 1731823310000,
+    "likeCount": 332,
+    "commentCount": 18
+  },
+
+  {
+    "authorId": "user_rahul",
+    "authorName": "Rahul",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/22.jpg",
+    "text": "Quick coffee break ☕ before diving into code!",
+    "imageUrl": "https://images.unsplash.com/photo-1509042239860-f550ce710b93",
+    "createdAt": 1731830010000,
+    "likeCount": 150,
+    "commentCount": 12
+  },
+  {
+    "authorId": "user_rahul",
+    "authorName": "Rahul",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/22.jpg",
+    "text": "Dark mode or light mode? I pick caffeine mode. 😂",
+    "imageUrl": "https://images.unsplash.com/photo-1517694712202-14dd9538aa97",
+    "createdAt": 1731831010000,
+    "likeCount": 210,
+    "commentCount": 17
+  },
+
+  {
+    "authorId": "user_ananya",
+    "authorName": "Ananya",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/49.jpg",
+    "text": "Peaceful morning yoga 💛",
+    "imageUrl": "https://images.unsplash.com/photo-1552058544-f2b08422138a",
+    "createdAt": 1731835010000,
+    "likeCount": 322,
+    "commentCount": 29
+  },
+  {
+    "authorId": "user_ananya",
+    "authorName": "Ananya",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/49.jpg",
+    "text": "Hydration check! 🍋",
+    "imageUrl": "https://images.unsplash.com/photo-1613470203710-7d47cebb6ec2",
+    "createdAt": 1731836510000,
+    "likeCount": 210,
+    "commentCount": 10
+  },
+
+  {
+    "authorId": "user_kabir",
+    "authorName": "Kabir",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/81.jpg",
+    "text": "Roadtrip diaries 🚗✨",
+    "imageUrl": "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee",
+    "createdAt": 1731840010000,
+    "likeCount": 430,
+    "commentCount": 23
+  },
+  {
+    "authorId": "user_kabir",
+    "authorName": "Kabir",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/81.jpg",
+    "text": "City skyline nights 🌆",
+    "imageUrl": "https://images.unsplash.com/photo-1469474968028-56623f02e42e",
+    "createdAt": 1731841510000,
+    "likeCount": 380,
+    "commentCount": 20
+  },
+
+  {
+    "authorId": "user_sara",
+    "authorName": "Sara",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/60.jpg",
+    "text": "Cozy book reading corner 📚✨",
+    "imageUrl": "https://images.unsplash.com/photo-1513521771623-a6b40a122e06",
+    "createdAt": 1731846010000,
+    "likeCount": 250,
+    "commentCount": 14
+  },
+  {
+    "authorId": "user_sara",
+    "authorName": "Sara",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/60.jpg",
+    "text": "New journal prompts incoming 📝",
+    "imageUrl": "https://images.unsplash.com/photo-1526304640581-d334cdbbf45e",
+    "createdAt": 1731848010000,
+    "likeCount": 170,
+    "commentCount": 9
+  },
+
+  {
+    "authorId": "user_veer",
+    "authorName": "Veer",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/20.jpg",
+    "text": "Evening cycle ride 🚴‍♂️ Nature never disappoints.",
+    "imageUrl": "https://images.unsplash.com/photo-1469474968028-56623f02e42e",
+    "createdAt": 1731850010000,
+    "likeCount": 355,
+    "commentCount": 18
+  },
+  {
+    "authorId": "user_veer",
+    "authorName": "Veer",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/men/20.jpg",
+    "text": "Post-ride smoothie!",
+    "imageUrl": "https://images.unsplash.com/photo-1556912991-87c6da6cfb53",
+    "createdAt": 1731851510000,
+    "likeCount": 230,
+    "commentCount": 14
+  },
+
+  {
+    "authorId": "user_riya",
+    "authorName": "Riya",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/44.jpg",
+    "text": "Trying a new saree look 💛 What do you think?",
+    "imageUrl": "https://images.unsplash.com/photo-1560343090-f0409e92791e",
+    "createdAt": 1731854010000,
+    "likeCount": 460,
+    "commentCount": 28
+  },
+  {
+    "authorId": "user_riya",
+    "authorName": "Riya",
+    "authorAvatarUrl": "https://randomuser.me/api/portraits/women/44.jpg",
+    "text": "Evening glow ✨",
+    "imageUrl": "https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e",
+    "createdAt": 1731855510000,
+    "likeCount": 399,
+    "commentCount": 25
+  }
+]

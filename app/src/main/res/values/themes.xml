@@ -1,0 +1,11 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Single app theme used by AndroidManifest -->
+    <style name="Theme.GirlSpace" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- For now, use defaults from Material3; we will customize later. -->
+        <item name="android:statusBarColor" tools:targetApi="l">
+            @android:color/transparent
+        </item>
+    </style>
+
+</resources>
