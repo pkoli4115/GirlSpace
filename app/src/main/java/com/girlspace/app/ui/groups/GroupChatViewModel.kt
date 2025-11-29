@@ -3,11 +3,13 @@ package com.girlspace.app.ui.groups
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import com.girlspace.app.data.chat.ChatMessage
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -34,6 +36,10 @@ class GroupChatViewModel : ViewModel() {
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping
 
+    // For reactions
+    private val _selectedMessageForReaction = MutableStateFlow<String?>(null)
+    val selectedMessageForReaction: StateFlow<String?> = _selectedMessageForReaction
+
     /**
      * Start listening to messages for this group.
      */
@@ -58,12 +64,15 @@ class GroupChatViewModel : ViewModel() {
                 val list = docs.map { doc ->
                     ChatMessage(
                         id = doc.id,
-                        threadId = groupId, // reuse field for groupId
+                        threadId = groupId, // reuse for groupId
                         senderId = doc.getString("senderId") ?: "",
                         senderName = doc.getString("senderName") ?: "GirlSpace user",
                         text = doc.getString("text") ?: "",
-                        createdAt = doc.getTimestamp("createdAt"),
-                        readBy = (doc.get("readBy") as? List<String>) ?: emptyList()
+                        mediaUrl = doc.getString("mediaUrl"),
+                        mediaType = doc.getString("mediaType"),
+                        createdAt = doc.getTimestamp("createdAt") ?: Timestamp.now(),
+                        readBy = (doc.get("readBy") as? List<String>) ?: emptyList(),
+                        reactions = (doc.get("reactions") as? Map<String, String>) ?: emptyMap()
                     )
                 }
                 _messages.value = list
@@ -93,10 +102,7 @@ class GroupChatViewModel : ViewModel() {
             .collection("messages")
 
         val newDoc = messagesRef.document()
-
-        val data = hashMapOf(
-            "id" to newDoc.id,
-            "threadId" to groupId,
+        val data = mapOf(
             "senderId" to user.uid,
             "senderName" to (user.displayName ?: "GirlSpace user"),
             "text" to text,
@@ -114,6 +120,36 @@ class GroupChatViewModel : ViewModel() {
                 Log.e("GroupChatViewModel", "sendMessage failed", e)
                 _isSending.value = false
                 _error.value = e.message ?: "Failed to send message"
+            }
+    }
+
+    // --- Reactions ---
+
+    fun openReactionPicker(messageId: String) {
+        _selectedMessageForReaction.value = messageId
+    }
+
+    fun closeReactionPicker() {
+        _selectedMessageForReaction.value = null
+    }
+
+    fun reactToMessage(messageId: String, emoji: String) {
+        val groupId = currentGroupId ?: return
+        val userId = auth.currentUser?.uid ?: return
+
+        val msgRef = firestore
+            .collection("groups")
+            .document(groupId)
+            .collection("messages")
+            .document(messageId)
+
+        val updates = mapOf(
+            "reactions.$userId" to emoji
+        )
+
+        msgRef.set(updates, SetOptions.merge())
+            .addOnFailureListener { e ->
+                Log.e("GroupChatViewModel", "reactToMessage failed", e)
             }
     }
 

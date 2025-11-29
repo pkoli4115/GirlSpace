@@ -1,69 +1,103 @@
 package com.girlspace.app.ui.groups
+import androidx.compose.foundation.clickable
+import android.media.MediaPlayer
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Send
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.navigation.NavHostController
+import com.girlspace.app.R
 import com.girlspace.app.data.chat.ChatMessage
-import com.girlspace.app.notifications.ChatNotificationHelper
-import kotlinx.coroutines.launch
-import java.text.SimpleDateFormat
-import java.util.Locale
-
-// 👉 Make sure you have this import somewhere at the top:
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupChatScreen(
-    navController: NavHostController,
     groupId: String,
     groupName: String,
-    viewModel: GroupChatViewModel = viewModel()
+    onBack: (() -> Unit)? = null,
+    vm: GroupChatViewModel = viewModel()
 ) {
+    val messages by vm.messages.collectAsState()
+    val inputText by vm.inputText.collectAsState()
+    val isSending by vm.isSending.collectAsState()
+    val error by vm.error.collectAsState()
+    val isTyping by vm.isTyping.collectAsState()
+    val selectedForReaction by vm.selectedMessageForReaction.collectAsState()
+
     val context = LocalContext.current
-    val messages by viewModel.messages.collectAsState()
-    val inputText by viewModel.inputText.collectAsState()
-    val isSending by viewModel.isSending.collectAsState()
-    val error by viewModel.error.collectAsState()
-    val isTyping by viewModel.isTyping.collectAsState()
+    val currentUid = vm.currentUserId()
 
-    val currentUserId = viewModel.currentUserId()
-    var lastNotifiedId by remember { mutableStateOf<String?>(null) }
-
-    // Start listening for this group
+    // Start listening to this group
     LaunchedEffect(groupId) {
-        viewModel.start(groupId)
+        vm.start(groupId)
     }
 
-    // Local notification when a new message arrives from someone else
-    LaunchedEffect(messages) {
-        val latest = messages.lastOrNull()
-        if (latest != null &&
-            latest.id != lastNotifiedId &&
-            latest.senderId != currentUserId
+    // 🔊 Bee / pop sound
+    val reactionPlayer = remember {
+        MediaPlayer.create(context, R.raw.reaction_bee)
+    }
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                reactionPlayer.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // Full emoji picker state
+    var showEmojiPicker by remember { mutableStateOf(false) }
+    var emojiPickerTargetId by remember { mutableStateOf<String?>(null) }
+
+    // Track last notified message for potential local notification (optional)
+    var lastNotifiedMessageId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(messages.size) {
+        val last = messages.lastOrNull()
+        if (last != null &&
+            last.senderId != null &&
+            last.senderId != currentUid &&
+            last.id.isNotBlank() &&
+            last.id != lastNotifiedMessageId
         ) {
-            ChatNotificationHelper.showIncomingMessage(
-                context = context,
-                title = groupName,
-                body = latest.text.ifBlank { "New message in $groupName" }
-            )
-            lastNotifiedId = latest.id
+            // If you have a notification helper for groups, call it here.
+            lastNotifiedMessageId = last.id
         }
     }
 
@@ -71,223 +105,361 @@ fun GroupChatScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Column {
-                        Text(groupName)
-                        Text(
-                            text = if (isTyping) "Someone is typing…" else "Group chat",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = groupName,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 },
                 navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Back"
-                        )
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                imageVector = Icons.Default.ArrowBack,
+                                contentDescription = "Back"
+                            )
+                        }
                     }
                 }
             )
         }
-    ) { padding ->
+    ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(paddingValues)
         ) {
-            // 🔹 Messages take the remaining space
-            MessagesList(
-                messages = messages,
-                currentUserId = currentUserId,
-                modifier = Modifier.weight(1f)
-            )
 
-            // 🔹 "You are typing…" for local feedback
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(messages) { msg ->
+                    val mine = msg.senderId == currentUid
+
+                    GroupMessageBubble(
+                        message = msg,
+                        mine = mine,
+                        showReactionBar = !mine && selectedForReaction == msg.id,
+                        onLongPress = {
+                            if (!mine) {
+                                try {
+                                    if (reactionPlayer.isPlaying) {
+                                        reactionPlayer.seekTo(0)
+                                    }
+                                    reactionPlayer.start()
+                                } catch (_: Exception) {
+                                }
+                                vm.openReactionPicker(msg.id)
+                                emojiPickerTargetId = msg.id
+                            }
+                        },
+                        onReactionSelected = { emoji ->
+                            vm.reactToMessage(msg.id, emoji)
+                            vm.closeReactionPicker()
+                            emojiPickerTargetId = null
+                        },
+                        onMoreReactions = {
+                            emojiPickerTargetId = msg.id
+                            showEmojiPicker = true
+                        }
+                    )
+                }
+            }
+
             if (isTyping) {
                 Text(
-                    text = "You are typing…",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = "Someone is typing…",
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                    textAlign = TextAlign.Start
+                        .padding(start = 16.dp, bottom = 4.dp)
                 )
             }
 
-            // 🔹 Input bar
-            ChatInputBar(
-                text = inputText,
-                onTextChange = { viewModel.updateInput(it) },
-                onSend = { viewModel.sendMessage() },
-                isSending = isSending
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    modifier = Modifier.weight(1f),
+                    value = inputText,
+                    onValueChange = { vm.updateInput(it) },
+                    placeholder = { Text("Type a message…") },
+                    maxLines = 4
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                IconButton(
+                    onClick = { vm.sendMessage() },
+                    enabled = inputText.isNotBlank() && !isSending
+                ) {
+                    if (isSending) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = "Send"
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    if (showEmojiPicker && emojiPickerTargetId != null) {
+        EmojiPickerDialog(
+            onDismiss = {
+                showEmojiPicker = false
+                emojiPickerTargetId = null
+                vm.closeReactionPicker()
+            },
+            onEmojiSelected = { emoji ->
+                emojiPickerTargetId?.let { msgId ->
+                    vm.reactToMessage(msgId, emoji)
+                }
+                vm.closeReactionPicker()
+                showEmojiPicker = false
+                emojiPickerTargetId = null
+            }
+        )
     }
 
     if (error != null) {
         AlertDialog(
-            onDismissRequest = { viewModel.clearError() },
+            onDismissRequest = { vm.clearError() },
             confirmButton = {
-                TextButton(onClick = { viewModel.clearError() }) {
+                TextButton(onClick = { vm.clearError() }) {
                     Text("OK")
                 }
             },
-            title = { Text("Chat") },
+            title = { Text("Group chat") },
             text = { Text(error ?: "") }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessagesList(
-    messages: List<ChatMessage>,
-    currentUserId: String?,
-    modifier: Modifier = Modifier
+private fun GroupMessageBubble(
+    message: ChatMessage,
+    mine: Boolean,
+    showReactionBar: Boolean,
+    onLongPress: () -> Unit,
+    onReactionSelected: (String) -> Unit,
+    onMoreReactions: () -> Unit
 ) {
-    val sdfTime = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
+    val timeText = message.createdAt?.toDate()?.let {
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(it)
+    } ?: ""
 
-    LazyColumn(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        reverseLayout = false
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
     ) {
-        itemsIndexed(messages) { _, msg ->
-            val isMine = msg.senderId == currentUserId
-            val timeText = msg.createdAt?.toDate()?.let { sdfTime.format(it) } ?: ""
+        Column(
+            modifier = Modifier.widthIn(max = 260.dp)
+        ) {
+            AnimatedVisibility(visible = showReactionBar) {
+                ReactionBar(
+                    modifier = Modifier
+                        .padding(bottom = 4.dp)
+                        .align(if (mine) Alignment.End else Alignment.Start),
+                    onSelect = onReactionSelected,
+                    onMore = onMoreReactions
+                )
+            }
 
-            Row(
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 2.dp),
-                horizontalArrangement = if (isMine) Arrangement.End else Arrangement.Start,
-                verticalAlignment = Alignment.Bottom
-            ) {
-                if (!isMine) {
-                    // Avatar
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .clip(CircleShape)
-                            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = msg.senderName.firstOrNull()?.uppercase() ?: "G",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(6.dp))
-                }
-
-                Column(
-                    horizontalAlignment = if (isMine) Alignment.End else Alignment.Start
-                ) {
-                    Surface(
-                        shape = RoundedCornerShape(
+                    .clip(
+                        RoundedCornerShape(
                             topStart = 16.dp,
                             topEnd = 16.dp,
-                            bottomStart = if (isMine) 16.dp else 4.dp,
-                            bottomEnd = if (isMine) 4.dp else 16.dp
-                        ),
-                        color = if (isMine)
-                            MaterialTheme.colorScheme.primary
-                        else
-                            MaterialTheme.colorScheme.surfaceVariant
+                            bottomStart = if (mine) 16.dp else 0.dp,
+                            bottomEnd = if (mine) 0.dp else 16.dp
+                        )
+                    )
+                    .background(
+                        if (mine) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.secondaryContainer
+                    )
+                    .combinedClickable(
+                        onClick = {},
+                        onLongClick = onLongPress
+                    )
+                    .padding(horizontal = 10.dp, vertical = 6.dp)
+            ) {
+                if (!mine) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(
+                        Box(
                             modifier = Modifier
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
-                                .widthIn(max = 260.dp)
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                ),
+                            contentAlignment = Alignment.Center
                         ) {
-                            if (!isMine) {
-                                Text(
-                                    text = msg.senderName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isMine) Color.White.copy(alpha = 0.8f)
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            if (msg.text.isNotBlank()) {
-                                Text(
-                                    text = msg.text,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (isMine) Color.White
-                                    else MaterialTheme.colorScheme.onSurface
-                                )
-                            }
+                            Text(
+                                text = message.senderName.firstOrNull()?.uppercase() ?: "G",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold
+                            )
                         }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = message.senderName.ifBlank { "GirlSpace user" },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
+                    Spacer(modifier = Modifier.height(2.dp))
+                }
 
+                val body = when {
+                    message.text.isNotBlank() -> message.text
+                    message.mediaUrl != null -> "[Media]"
+                    else -> ""
+                }
+
+                if (body.isNotBlank()) {
+                    Text(
+                        text = body,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (mine) Color.White else MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+
+                if (timeText.isNotBlank()) {
                     Text(
                         text = timeText,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp, end = 4.dp, start = 4.dp)
+                        color = if (mine) Color.White.copy(alpha = 0.8f)
+                        else MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                        modifier = Modifier.align(Alignment.End)
                     )
+                }
+            }
+
+            // Reactions line
+            AnimatedVisibility(visible = message.reactions.isNotEmpty()) {
+                Row(
+                    modifier = Modifier.padding(top = 4.dp),
+                    horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
+                ) {
+                    message.reactions.values.forEach { emoji ->
+                        Text(
+                            text = emoji,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier.padding(end = 4.dp)
+                        )
+                    }
                 }
             }
         }
     }
 }
 
+// Re-use the same ReactionBar & EmojiPickerDialog as ChatsScreen
+
 @Composable
-private fun ChatInputBar(
-    text: String,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    isSending: Boolean
+private fun ReactionBar(
+    modifier: Modifier = Modifier,
+    onSelect: (String) -> Unit,
+    onMore: () -> Unit
 ) {
+    val quickReactions = listOf("❤️", "👍", "😂", "😮", "😢", "🔥")
+
     Surface(
-        tonalElevation = 3.dp
+        shape = RoundedCornerShape(24.dp),
+        tonalElevation = 4.dp,
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = modifier
     ) {
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 8.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
-            // Emoji “button” (user uses keyboard emoji row)
-            TextButton(
-                onClick = { /* system keyboard emoji; no-op */ },
-                contentPadding = PaddingValues(6.dp)
-            ) {
-                Text("😊")
+            quickReactions.forEach { emoji ->
+                Text(
+                    text = emoji,
+                    style = MaterialTheme.typography.titleLarge,
+                    modifier = Modifier
+                        .padding(horizontal = 6.dp)
+                        .clickable { onSelect(emoji) }
+                )
             }
 
-            Spacer(modifier = Modifier.width(4.dp))
-
-            OutlinedTextField(
-                value = text,
-                onValueChange = onTextChange,
-                modifier = Modifier.weight(1f),
-                placeholder = { Text("Message…") },
-                maxLines = 4,
-                shape = RoundedCornerShape(20.dp)
+            Text(
+                text = "➕",
+                style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier
+                    .padding(start = 10.dp)
+                    .clickable { onMore() }
             )
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.width(6.dp))
+@Composable
+private fun EmojiPickerDialog(
+    onDismiss: () -> Unit,
+    onEmojiSelected: (String) -> Unit
+) {
+    // Same list as ChatsScreen
+    val allEmojis = listOf(
+        "😀","😁","😂","🤣","😃","😄","😅","😆",
+        "😉","😊","🥰","😍","🤩","😘","😗","😙",
+        "😚","🙂","🤗","🤔","😐","😑","🙄","😏",
+        "😣","😥","😮","🤤","😪","😫","😭","😤",
+        "😡","😠","🤬","🤯","😳","🥵","🥶","😎",
+        "🤓","😇","🥳","🤠","😴","🤢","🤮","🤧"
+    )
 
-            IconButton(
-                onClick = onSend,
-                enabled = text.isNotBlank() && !isSending
-            ) {
-                if (isSending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
-                    )
-                } else {
-                    Icon(
-                        imageVector = Icons.Default.Send,
-                        contentDescription = "Send"
-                    )
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        confirmButton = {},
+        title = { Text("More reactions") },
+        text = {
+            Column {
+                Text(
+                    text = "Tap an emoji to react",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+
+                val chunked = allEmojis.chunked(8)
+                chunked.forEach { row ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        row.forEach { emoji ->
+                            Text(
+                                text = emoji,
+                                style = MaterialTheme.typography.headlineSmall,
+                                modifier = Modifier
+                                    .padding(horizontal = 4.dp)
+                                    .clickable { onEmojiSelected(emoji) }
+                            )
+                        }
+                    }
                 }
             }
         }
-    }
+    )
 }

@@ -4,8 +4,13 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.facebook.CallbackManager
 import com.girlspace.app.ui.GirlSpaceApp
+import com.girlspace.app.ui.onboarding.OnboardingViewModel
+import com.girlspace.app.ui.theme.VibeTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
@@ -21,11 +26,16 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ❌ NO MORE FacebookSdk.sdkInitialize(...)
         // The SDK reads ApplicationId from manifest automatically.
-
         setContent {
-            GirlSpaceApp()
+            // Get current vibe from DataStore via OnboardingViewModel
+            val onboardingViewModel: OnboardingViewModel = hiltViewModel()
+            val themeMode by onboardingViewModel.themeMode.collectAsState()
+
+            // Apply global color scheme based on selected vibe
+            VibeTheme(themeMode = themeMode) {
+                GirlSpaceApp()
+            }
         }
     }
 

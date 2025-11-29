@@ -1,18 +1,39 @@
 package com.girlspace.app.ui.profile
 
+import androidx.compose.foundation.layout.width
 import android.app.Activity
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -21,13 +42,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
+import coil.compose.AsyncImage
 import com.facebook.login.LoginManager
 import com.girlspace.app.R
+import com.girlspace.app.ui.onboarding.OnboardingViewModel
 import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import com.google.firebase.storage.FirebaseStorage
 
 @Composable
 fun ProfileScreen(
@@ -41,14 +67,23 @@ fun ProfileScreen(
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
 
+    // Onboarding / theme ViewModel for vibe changes
+    val onboardingViewModel: OnboardingViewModel = hiltViewModel()
+    val currentThemeMode by onboardingViewModel.themeMode.collectAsState()
+
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
     var phone by remember { mutableStateOf("") }
     var provider by remember { mutableStateOf("") }
     var isPremium by remember { mutableStateOf(false) }
     var plan by remember { mutableStateOf("free") }
+    var photoUrl by remember { mutableStateOf<String?>(null) }
+    var vibeKey by remember { mutableStateOf<String?>(null) }
 
-    // Load from Firestore
+    var isUploadingAvatar by remember { mutableStateOf(false) }
+    var showVibeDialog by remember { mutableStateOf(false) }
+
+    // Load from Firestore and listen to changes
     LaunchedEffect(user?.uid) {
         val uid = user?.uid ?: return@LaunchedEffect
         FirebaseFirestore.getInstance()
@@ -76,14 +111,35 @@ fun ProfileScreen(
 
                 plan = resolvedPlan
                 isPremium = resolvedPlan == "premium"
+
+                photoUrl = doc.getString("photoUrl") ?: user.photoUrl?.toString()
+
+                // If user doc has explicit vibeKey, prefer that.
+                // Otherwise fall back to currentThemeMode.
+                val storedVibe = doc.getString("vibeKey")
+                vibeKey = storedVibe ?: currentThemeMode
             }
     }
 
-    val planLabel = when (plan) {
-        "basic" -> "Basic (paid)"
-        "premium" -> "Premium+ (all access)"
-        else -> "Free (ads)"
+    // --- Vibe UI helpers ---
+    val vibeOptions = remember {
+        listOf(
+            VibeOption("serenity", "Serenity", Color(0xFF1877F2)),
+            VibeOption("radiance", "Radiance", Color(0xFFF77737)),
+            VibeOption("wisdom", "Wisdom", Color(0xFF0A66C2)),
+            VibeOption("pulse", "Pulse", Color(0xFF111827)),
+            VibeOption("harmony", "Harmony", Color(0xFF25D366)),
+            VibeOption("ignite", "Ignite", Color(0xFFFF0000))
+        )
     }
+
+    val currentVibeLabel = vibeOptions
+        .firstOrNull { it.key == vibeKey }
+        ?.label ?: "Not set"
+
+    val currentVibeColor = vibeOptions
+        .firstOrNull { it.key == vibeKey }
+        ?.color ?: MaterialTheme.colorScheme.primary
 
     // Google sign-out client
     val webClientId = remember { context.getString(R.string.default_web_client_id) }
@@ -93,6 +149,66 @@ fun ProfileScreen(
             .requestEmail()
             .build()
         GoogleSignIn.getClient(context, gso)
+    }
+
+    // Avatar picker launcher
+    val avatarPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null && user != null) {
+            isUploadingAvatar = true
+            val uid = user.uid
+            val storageRef = FirebaseStorage.getInstance()
+                .reference
+                .child("users/$uid/avatar.jpg")
+
+            storageRef.putFile(uri)
+                .addOnSuccessListener {
+                    storageRef.downloadUrl
+                        .addOnSuccessListener { downloadUri ->
+                            val url = downloadUri.toString()
+                            photoUrl = url
+                            // Save to Firestore
+                            FirebaseFirestore.getInstance()
+                                .collection("users")
+                                .document(uid)
+                                .set(
+                                    mapOf("photoUrl" to url),
+                                    SetOptions.merge()
+                                )
+                                .addOnFailureListener { e ->
+                                    Log.e("GirlSpace", "Failed to save photoUrl", e)
+                                }
+                            isUploadingAvatar = false
+                            Toast.makeText(context, "Profile photo updated", Toast.LENGTH_SHORT)
+                                .show()
+                        }
+                        .addOnFailureListener { e ->
+                            Log.e("GirlSpace", "Failed to get download URL", e)
+                            isUploadingAvatar = false
+                            Toast.makeText(
+                                context,
+                                "Failed to update photo: ${e.localizedMessage}",
+                                Toast.LENGTH_LONG
+                            ).show()
+                        }
+                }
+                .addOnFailureListener { e ->
+                    Log.e("GirlSpace", "Avatar upload failed", e)
+                    isUploadingAvatar = false
+                    Toast.makeText(
+                        context,
+                        "Upload failed: ${e.localizedMessage}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+        }
+    }
+
+    val planLabel = when (plan) {
+        "basic" -> "Basic (paid)"
+        "premium" -> "Premium+ (all access)"
+        else -> "Free (ads)"
     }
 
     Surface(
@@ -107,19 +223,41 @@ fun ProfileScreen(
             verticalArrangement = Arrangement.Top
         ) {
 
-            // Avatar
+            // Avatar (tap to change)
             Box(
                 modifier = Modifier
                     .size(120.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF1666C5)),
+                    .background(Color(0xFF1666C5))
+                    .clickable {
+                        avatarPickerLauncher.launch("image/*")
+                    },
                 contentAlignment = Alignment.Center
             ) {
+                if (!photoUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = photoUrl,
+                        contentDescription = "Profile photo",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(CircleShape)
+                    )
+                } else {
+                    Text(
+                        text = name.firstOrNull()?.uppercase() ?: "G",
+                        style = MaterialTheme.typography.displaySmall,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+
+            if (isUploadingAvatar) {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = name.firstOrNull()?.uppercase() ?: "G",
-                    style = MaterialTheme.typography.displaySmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
+                    text = "Uploading photo...",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary
                 )
             }
 
@@ -169,6 +307,49 @@ fun ProfileScreen(
             )
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // Vibe row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { showVibeDialog = true }
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    // color dot
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(currentVibeColor)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Vibe",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = currentVibeLabel,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                        )
+                    }
+                }
+                Text(
+                    text = "Change",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
 
             // Premium badge
             Box(
@@ -224,7 +405,8 @@ fun ProfileScreen(
                     auth.signOut()
                     try {
                         LoginManager.getInstance().logOut()
-                    } catch (_: Exception) {}
+                    } catch (_: Exception) {
+                    }
                     googleSignInClient.signOut()
 
                     Toast.makeText(context, "Logged out", Toast.LENGTH_SHORT).show()
@@ -238,6 +420,112 @@ fun ProfileScreen(
             ) {
                 Text("Logout")
             }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // Delete account (navigates to dedicated screen)
+            TextButton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(40.dp),
+                onClick = {
+                    navController.navigate("deleteAccount")
+                },
+                colors = ButtonDefaults.textButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
+            ) {
+                Text(
+                    text = "Delete my account",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center
+                )
+            }
         }
+    }
+
+    // Vibe selection dialog
+    if (showVibeDialog) {
+        AlertDialog(
+            onDismissRequest = { showVibeDialog = false },
+            title = {
+                Text(
+                    text = "Choose your vibe",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    vibeOptions.forEach { vibe ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    changeVibe(
+                                        newVibeKey = vibe.key,
+                                        onboardingViewModel = onboardingViewModel,
+                                        currentUserUid = user?.uid,
+                                    )
+                                    vibeKey = vibe.key
+                                    showVibeDialog = false
+                                }
+                                .padding(vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .clip(CircleShape)
+                                    .background(vibe.color)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = vibe.label,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showVibeDialog = false }) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+}
+
+private data class VibeOption(
+    val key: String,
+    val label: String,
+    val color: Color
+)
+
+/**
+ * Update vibe both locally (DataStore) and in Firestore.
+ */
+private fun changeVibe(
+    newVibeKey: String,
+    onboardingViewModel: OnboardingViewModel,
+    currentUserUid: String?
+) {
+    // 1) Update DataStore → theme changes immediately
+    onboardingViewModel.saveThemeMode(newVibeKey)
+
+    // 2) Update Firestore per-user
+    if (currentUserUid != null) {
+        FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(currentUserUid)
+            .set(
+                mapOf(
+                    "vibeKey" to newVibeKey,
+                    "hasVibe" to true
+                ),
+                SetOptions.merge()
+            )
     }
 }

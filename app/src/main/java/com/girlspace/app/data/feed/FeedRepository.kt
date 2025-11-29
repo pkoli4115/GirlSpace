@@ -27,12 +27,6 @@ class FeedRepository(
 ) {
     companion object {
         private const val TAG = "FeedRepository"
-
-        // Non-premium: max 1 image
-        private const val MAX_IMAGES_FREE = 1
-
-        // Premium users can attach more images per post
-        private const val MAX_IMAGES_PREMIUM = 10
     }
 
     /**
@@ -54,13 +48,16 @@ class FeedRepository(
                         text = doc.getString("text") ?: "",
                         imageUrls = (doc.get("imageUrls") as? List<*>)?.mapNotNull { it as? String }
                             ?: emptyList(),
+                        videoUrls = (doc.get("videoUrls") as? List<*>)?.mapNotNull { it as? String }
+                            ?: emptyList(),
                         createdAt = doc.getTimestamp("createdAt"),
                         likeCount = (doc.getLong("likeCount") ?: 0L).toInt(),
                         likedBy = (doc.get("likedBy") as? List<*>)?.mapNotNull { it as? String }
                             ?: emptyList(),
                         commentsCount = (doc.getLong("commentsCount") ?: 0L).toInt(),
                         authorName = doc.getString("authorName"),
-                        authorPhoto = doc.getString("authorPhoto")
+                        authorPhoto = doc.getString("authorPhoto"),
+                        isAuthorPremium = doc.getBoolean("isAuthorPremium") ?: false
                     )
                 } ?: emptyList()
 
@@ -70,9 +67,12 @@ class FeedRepository(
 
     /**
      * Create a post with text + optional multiple images.
-     * Applies subscription rule:
-     *  - Free user: max 1 image
-     *  - Premium user: up to MAX_IMAGES_PREMIUM
+     *
+     * Plan / image-limit logic is handled at ViewModel/UI level.
+     * Here we simply:
+     *  - fetch user info for name/photo
+     *  - upload images
+     *  - write Firestore document
      */
     fun createPost(
         text: String,
@@ -85,19 +85,14 @@ class FeedRepository(
             return
         }
 
-        // Step 1: load user profile to check premium flag + name/photo
         firestore.collection("users")
             .document(currentUser.uid)
             .get()
             .addOnSuccessListener { doc ->
-                val isPremium = doc.getBoolean("isPremium") ?: false
-
-                val allowedMax = if (isPremium) MAX_IMAGES_PREMIUM else MAX_IMAGES_FREE
-                if (!isPremium && bitmaps.size > allowedMax) {
-                    // 🚫 Free user trying to attach more than 1 image
-                    onResult(CreatePostResult.PremiumRequired)
-                    return@addOnSuccessListener
-                }
+                val isPremiumFlag = doc.getBoolean("isPremium") ?: false
+                val planRaw = doc.getString("plan")
+                val plan = (planRaw ?: if (isPremiumFlag) "premium" else "free")
+                    .lowercase()
 
                 val userSummary = UserSummary(
                     uid = currentUser.uid,
@@ -105,11 +100,15 @@ class FeedRepository(
                     photoUrl = doc.getString("photoUrl") ?: currentUser.photoUrl?.toString()
                 )
 
-                // Step 2: actually create the post document + upload images
+                // Hard safety cap: never upload more than 10 images
+                val safeBitmaps = bitmaps.take(10)
+
                 internalCreatePostWithUser(
                     text = text,
-                    bitmaps = bitmaps.take(allowedMax),
+                    bitmaps = safeBitmaps,
                     user = userSummary,
+                    plan = plan,
+                    isPremiumFlag = isPremiumFlag,
                     onResult = onResult
                 )
             }
@@ -123,6 +122,8 @@ class FeedRepository(
         text: String,
         bitmaps: List<Bitmap>,
         user: UserSummary,
+        plan: String,
+        isPremiumFlag: Boolean,
         onResult: (CreatePostResult) -> Unit
     ) {
         val postId = UUID.randomUUID().toString()
@@ -133,17 +134,20 @@ class FeedRepository(
                 "uid" to user.uid,
                 "text" to text,
                 "imageUrls" to emptyList<String>(),
+                "videoUrls" to emptyList<String>(),
                 "createdAt" to FieldValue.serverTimestamp(),
                 "likeCount" to 0,
                 "likedBy" to emptyList<String>(),
                 "commentsCount" to 0,
                 "authorName" to user.name,
-                "authorPhoto" to user.photoUrl
+                "authorPhoto" to user.photoUrl,
+                "isAuthorPremium" to isPremiumFlag,
+                "planAtPostTime" to plan
             )
 
             firestore.collection("posts")
                 .document(postId)
-                .set(postData)
+                .set(postData, SetOptions.merge())
                 .addOnSuccessListener {
                     onResult(CreatePostResult.Success)
                 }
@@ -166,17 +170,20 @@ class FeedRepository(
                             "uid" to user.uid,
                             "text" to text,
                             "imageUrls" to uploadResult.imageUrls,
+                            "videoUrls" to emptyList<String>(),
                             "createdAt" to FieldValue.serverTimestamp(),
                             "likeCount" to 0,
                             "likedBy" to emptyList<String>(),
                             "commentsCount" to 0,
                             "authorName" to user.name,
-                            "authorPhoto" to user.photoUrl
+                            "authorPhoto" to user.photoUrl,
+                            "isAuthorPremium" to isPremiumFlag,
+                            "planAtPostTime" to plan
                         )
 
                         firestore.collection("posts")
                             .document(postId)
-                            .set(postData)
+                            .set(postData, SetOptions.merge())
                             .addOnSuccessListener {
                                 onResult(CreatePostResult.Success)
                             }

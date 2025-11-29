@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.billing
+
 import kotlinx.coroutines.SupervisorJob
 import android.app.Activity
 import android.content.Context
@@ -19,7 +20,6 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -41,7 +41,8 @@ class BillingManager(
     companion object {
         // ⚠️ Make sure these MATCH your Play Console product IDs exactly.
         const val BASIC_MONTHLY_ID = "com.qtilabs.girlspace.sub.basic.monthly"
-        const val PREMIUM_MONTHLY_ID = "com.qtilabs.girlspace.sub.premium.monthly"
+        // New Premium+ ID: com.qtilabs.girlspace.sub.premium  (base plan: monthly)
+        const val PREMIUM_MONTHLY_ID = "com.qtilabs.girlspace.sub.premium"
 
         private const val TAG = "BillingManager"
     }

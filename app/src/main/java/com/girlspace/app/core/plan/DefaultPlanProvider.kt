@@ -1,21 +1,22 @@
 package com.girlspace.app.core.plan
 
 /**
- * If Firestore has no custom config, we use these defaults.
+ * Local fallback plan limits.
+ * Used ONLY if Firestore does not return a custom config.
  */
-
 object DefaultPlanProvider {
 
     val FREE = PlanLimits(
         maxImagesPerPost = 1,
-        maxStoryMedia = 2,                       // 2 per day
-        maxReelDurationSec = 10,                 // 10 seconds
-        allowedGroupCreations = 0,               // cannot create groups
+        maxStoryMedia = 2,             // Stories per day
+        maxReelDurationSec = 10,
+        allowedGroupCreations = 0,
         canSendVideoInGroups = false,
         canSendVoiceNotes = false,
         storageLimitGb = 1,
         adsEnabled = true,
-        creatorMode = false
+        creatorMode = false,
+        maxVideosPerDay = 0            // NEW — Free users cannot upload videos
     )
 
     val BASIC = PlanLimits(
@@ -26,19 +27,21 @@ object DefaultPlanProvider {
         canSendVideoInGroups = true,
         canSendVoiceNotes = true,
         storageLimitGb = 5,
-        adsEnabled = true,                       // lighter ads
-        creatorMode = false
+        adsEnabled = true,             // lighter ads
+        creatorMode = false,
+        maxVideosPerDay = 3            // NEW — you can change the number
     )
 
     val PREMIUM = PlanLimits(
         maxImagesPerPost = 10,
-        maxStoryMedia = 1000,                    // unlimited practically
+        maxStoryMedia = 1000,
         maxReelDurationSec = 60,
         allowedGroupCreations = 100,
         canSendVideoInGroups = true,
         canSendVoiceNotes = true,
         storageLimitGb = 10,
         adsEnabled = false,
-        creatorMode = true                       // INCLUDED
+        creatorMode = true,
+        maxVideosPerDay = 10           // NEW — practically unlimited
     )
 }

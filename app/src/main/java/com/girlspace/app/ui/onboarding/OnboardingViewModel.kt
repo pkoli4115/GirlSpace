@@ -14,21 +14,37 @@ class OnboardingViewModel @Inject constructor(
     private val prefs: ThemePreferences
 ) : ViewModel() {
 
-    // current mood (“calm”, “romantic”, etc.)
+    /**
+     * Legacy mood string. Kept for backwards-compatibility with any older code.
+     * Not strictly needed for the new platform-theme onboarding, but harmless.
+     */
     val mood = prefs.mood.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = "calm"
     )
 
-    // theme mode (“mood”, “daily”, “random”, “static_feminine_default”, etc.)
+    /**
+     * Selected global theme "vibe" for the app.
+     *
+     * We now treat this as the PLATFORM THEME key, e.g.:
+     *  - "facebook"
+     *  - "instagram"
+     *  - "linkedin"
+     *  - "tiktok"
+     *  - "whatsapp"
+     *  - "youtube"
+     *
+     * Your app-level Theme can observe this and switch primary colors accordingly.
+     */
     val themeMode = prefs.themeMode.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = "daily"
+        // Default to a neutral, trusted theme if nothing chosen yet.
+        initialValue = "serenity"
     )
 
-    // whether onboarding has already been completed
+    /** Whether onboarding (vibe selection) has already been completed. */
     val firstLaunchDone = prefs.firstLaunchDone.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -41,19 +57,20 @@ class OnboardingViewModel @Inject constructor(
         }
     }
 
+    /** Save the selected theme key, e.g. "facebook", "instagram", etc. */
     fun saveThemeMode(value: String) {
         viewModelScope.launch {
             prefs.saveThemeMode(value)
         }
     }
 
-    /** Mark onboarding as completed in DataStore */
+    /** Mark onboarding as completed in DataStore. */
     fun saveFirstLaunchDone() {
         viewModelScope.launch {
             prefs.saveFirstLaunchDone(true)
         }
     }
 
-    // ✅ Backwards-compat alias so any old call to setFirstLaunchDone() still compiles
+    // Backwards-compat alias so any old call to setFirstLaunchDone() still compiles.
     fun setFirstLaunchDone() = saveFirstLaunchDone()
 }

@@ -1,18 +1,18 @@
 package com.girlspace.app.ui.billing
-import androidx.compose.material.icons.filled.ArrowBack
+
 import android.app.Activity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -22,6 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -38,6 +39,7 @@ fun PremiumScreen(
 ) {
     val context = LocalContext.current
     val activity = context as Activity
+    val uriHandler = LocalUriHandler.current
 
     // --- Billing manager ---
     val billingManager = remember { BillingManager(context.applicationContext) }
@@ -66,7 +68,13 @@ fun PremiumScreen(
             }
     }
 
-    // --- Layout ---
+    fun openManageOnPlay(productId: String) {
+        val pkg = context.packageName
+        val url =
+            "https://play.google.com/store/account/subscriptions?sku=$productId&package=$pkg"
+        uriHandler.openUri(url)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -106,67 +114,85 @@ fun PremiumScreen(
                 textAlign = TextAlign.Center
             )
 
-            if (isPremium) {
-                Text(
-                    text = "Thank you for supporting GirlSpace. You’ll see fewer limits and more features.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                    textAlign = TextAlign.Center
-                )
-            } else {
-                Text(
-                    text = "Upgrade to unlock more images per post, better media limits and an ad-light experience.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
-                    textAlign = TextAlign.Center
-                )
-            }
+            Text(
+                text = when {
+                    plan == "premium" || plan == "basic" ->
+                        "Thank you for supporting the platform. You’ll see fewer limits and more features."
+                    else ->
+                        "Upgrade to unlock more images per post, better media limits and a lighter ad experience."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
+                textAlign = TextAlign.Center
+            )
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // ----- Basic plan card -----
-            PlanCard(
+            // ----- Basic plan pill -----
+            PlanPill(
                 title = "Basic",
-                subtitle = "For active girls who want more freedom",
-                price = uiState.basicPrice ?: "₹79 / month*",
+                subtitle = "For regular members",
+                price = uiState.basicPrice ?: "₹199 / month*",
                 highlights = listOf(
                     "Up to 5 images per post",
-                    "Groups – create & join",
-                    "Chats with media (photos, voice)",
-                    "Lighter ads in feed"
+                    "Create & join communities",
+                    "Reduced ads in feed"
                 ),
+                badgeLabel = when (plan) {
+                    "basic" -> "Current"
+                    "premium" -> null
+                    else -> "Starter"
+                },
                 isCurrent = plan == "basic",
-                isRecommended = plan == "basic" || plan == "free",
-                buttonLabel = if (plan == "basic") "Manage subscription" else "Choose Basic",
-                onClick = {
-                    billingManager.launchBasicPurchase(activity)
+                primaryLabel = when (plan) {
+                    "basic" -> "Manage on Google Play"
+                    "premium" -> null                // 🔒 no button when already Premium
+                    else -> "Upgrade to Basic"
+                },
+                onPrimaryClick = when (plan) {
+                    "basic" -> { { openManageOnPlay(BASIC_MONTHLY_ID) } }
+                    "premium" -> { {} }              // no-op, button hidden anyway
+                    else -> { { billingManager.launchBasicPurchase(activity) } }
                 }
             )
 
-            // ----- Premium plan card -----
-            PlanCard(
+            // ----- Premium+ plan pill -----
+            PlanPill(
                 title = "Premium+",
                 subtitle = "For creators & power users",
-                price = uiState.premiumPrice ?: "₹149 / month*",
+                price = uiState.premiumPrice ?: "₹299 / month*",
                 highlights = listOf(
                     "Up to 10 images per post",
                     "Priority in feed ranking",
-                    "Future: 1:1 + group video calls",
-                    "Future: Creator badge & boosts",
                     "No ads in feed & stories"
                 ),
+                badgeLabel = when (plan) {
+                    "premium" -> "Current"
+                    else -> "Popular"
+                },
                 isCurrent = plan == "premium",
-                isRecommended = true,
-                buttonLabel = if (plan == "premium") "Manage subscription" else "Go Premium+",
-                onClick = {
-                    billingManager.launchPremiumPurchase(activity)
+                primaryLabel = when (plan) {
+                    "premium" -> "Manage on Google Play"
+                    else -> "Go Premium+"
+                },
+                onPrimaryClick = when (plan) {
+                    "premium" -> { { openManageOnPlay(PREMIUM_MONTHLY_ID) } }
+                    else -> { { billingManager.launchPremiumPurchase(activity) } }
                 }
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "*Prices shown are examples. Play Store will show the exact price for your region.",
+                text = "You can cancel or change plans anytime from Google Play. " +
+                        "Access continues until the end of the billing period. No refunds.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = "*Play Store will show the exact price for your region.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.6f),
                 textAlign = TextAlign.Center
@@ -174,7 +200,6 @@ fun PremiumScreen(
         }
     }
 
-    // Error dialog from BillingManager
     if (uiState.errorMessage != null) {
         AlertDialog(
             onDismissRequest = { billingManager.clearError() },
@@ -190,43 +215,42 @@ fun PremiumScreen(
 }
 
 @Composable
-private fun PlanCard(
+private fun PlanPill(
     title: String,
     subtitle: String,
     price: String,
     highlights: List<String>,
+    badgeLabel: String?,
     isCurrent: Boolean,
-    isRecommended: Boolean,
-    buttonLabel: String,
-    onClick: () -> Unit
+    primaryLabel: String?,
+    onPrimaryClick: () -> Unit
 ) {
-    Card(
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isCurrent) {
-                MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        shape = RoundedCornerShape(32.dp),
+        tonalElevation = if (isCurrent) 4.dp else 1.dp,
+        color = if (isCurrent) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)
+        } else {
+            MaterialTheme.colorScheme.surface
+        }
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(
+                modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
                     Text(
                         text = title,
-                        style = MaterialTheme.typography.titleLarge,
+                        style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     Text(
@@ -236,59 +260,58 @@ private fun PlanCard(
                     )
                 }
 
-                if (isRecommended) {
-                    Box(
-                        modifier = Modifier
-                            .background(
-                                color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f),
-                                shape = RoundedCornerShape(999.dp)
+                Column(
+                    horizontalAlignment = Alignment.End
+                ) {
+                    Text(
+                        text = price,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (badgeLabel != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Surface(
+                            shape = RoundedCornerShape(999.dp),
+                            color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = badgeLabel,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                                fontWeight = FontWeight.SemiBold
                             )
-                            .padding(horizontal = 10.dp, vertical = 4.dp)
-                    ) {
-                        Text(
-                            text = if (isCurrent) "Current" else "Popular",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.secondary,
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        }
                     }
                 }
             }
 
             Text(
-                text = price,
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold
+                text = highlights.joinToString(separator = "  •  "),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f)
             )
 
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                highlights.forEach { line ->
+            Spacer(modifier = Modifier.height(4.dp))
+
+            if (primaryLabel != null) {
+                Button(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(42.dp),
+                    onClick = onPrimaryClick,
+                    shape = RoundedCornerShape(999.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = Color.White
+                    )
+                ) {
                     Text(
-                        text = "• $line",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
+                        text = primaryLabel,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
                     )
                 }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Button(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(46.dp),
-                onClick = onClick,
-                shape = RoundedCornerShape(999.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = Color.White
-                )
-            ) {
-                Text(
-                    text = buttonLabel,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
             }
         }
     }

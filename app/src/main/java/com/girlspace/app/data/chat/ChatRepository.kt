@@ -1,236 +1,273 @@
 package com.girlspace.app.data.chat
-import com.girlspace.app.data.chat.*
+
 import android.util.Log
-import com.google.android.gms.tasks.Task
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.firestore.DocumentSnapshot
-import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.tasks.await
 
 class ChatRepository(
-    private val auth: FirebaseAuth,
-    private val firestore: FirebaseFirestore
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
+    private val firestore: FirebaseFirestore = FirebaseFirestore.getInstance()
 ) {
 
-    private val threadsCollection get() = firestore.collection("chatThreads")
+    // IMPORTANT: match your Firestore collection names
+    private val threadsRef = firestore.collection("chatThreads")     // <- fixed
+    private val messagesRef = firestore.collection("chat_messages")  // already exists
 
-    /**
-     * Listen for all 1:1 threads for the current user.
-     */
+    private fun currentUid(): String = auth.currentUser?.uid ?: ""
+    private fun currentName(): String = auth.currentUser?.displayName ?: "GirlSpace user"
+
+    // -------------------------------------------------------------------------
+    // THREADS
+    // -------------------------------------------------------------------------
+
     fun observeThreads(onUpdate: (List<ChatThread>) -> Unit): ListenerRegistration {
-        val currentUser = auth.currentUser
-            ?: throw IllegalStateException("User must be logged in to observe threads")
+        val uid = currentUid()
+        if (uid.isEmpty()) {
+            onUpdate(emptyList())
+            return firestore.collection("dummy").addSnapshotListener { _, _ -> }
+        }
 
-        return threadsCollection
-            .whereArrayContains("userIds", currentUser.uid)
-            .orderBy("lastTimestamp")
-            .addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    Log.e("ChatRepository", "observeThreads failed", error)
+        return threadsRef
+            .whereArrayContains("participants", uid)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    Log.e("ChatRepository", "observeThreads error", e)
                     onUpdate(emptyList())
                     return@addSnapshotListener
                 }
 
-                val docs = snapshot?.documents ?: emptyList()
-                val threads = docs.map { mapThreadDoc(it, currentUser.uid) }
-                onUpdate(threads)
+                val list = snap?.documents?.map { doc ->
+                    ChatThread(
+                        id = doc.id,
+                        userA = doc.getString("userA") ?: "",
+                        userB = doc.getString("userB") ?: "",
+                        userAName = doc.getString("userAName") ?: "",
+                        userBName = doc.getString("userBName") ?: "",
+                        lastMessage = doc.getString("lastMessage") ?: "",
+                        lastTimestamp = doc.getLong("lastTimestamp") ?: 0L,
+                        unreadCount = (doc.get("unread_$uid") as? Long)?.toInt() ?: 0
+                    )
+                } ?: emptyList()
+
+                onUpdate(list.sortedByDescending { it.lastTimestamp })
             }
     }
 
     /**
-     * Start or get a 1:1 thread with a user identified by email.
+     * Start or get an existing thread between current user and user with [email].
+     * Requires that /users/{uid}.email == [email].
      */
-    suspend fun startOrGetThreadByEmail(otherEmail: String): ChatThread {
-        val currentUser = auth.currentUser
-            ?: throw IllegalStateException("User must be logged in to start a chat")
+    suspend fun startOrGetThreadByEmail(email: String): ChatThread {
+        val myId = currentUid()
+        val myName = currentName()
 
-        // 1) Find the other user in /users by email
-        val usersQuery = await(
-            firestore.collection("users")
-                .whereEqualTo("email", otherEmail)
-                .limit(1)
-                .get()
-        )
+        if (myId.isEmpty()) throw IllegalStateException("Not logged in")
 
-        if (usersQuery.isEmpty) {
-            throw IllegalStateException("No user found with that email")
+        // 1) Find target user by email
+        val userSnap = firestore.collection("users")
+            .whereEqualTo("email", email)
+            .get()
+            .await()
+
+        if (userSnap.isEmpty) {
+            throw IllegalStateException("No user found with email $email")
         }
 
-        val otherDoc = usersQuery.documents.first()
-        val otherUid = otherDoc.id
-        val otherName = otherDoc.getString("name") ?: otherEmail
+        val otherDoc = userSnap.documents.first()
+        val otherId = otherDoc.id
+        val otherName = otherDoc.getString("name")
+            ?: otherDoc.getString("email")
+            ?: "GirlSpace user"
 
-        // 2) Compute a stable pair key so we can re-find the same thread
-        val pairKey = listOf(currentUser.uid, otherUid).sorted().joinToString("_")
+        // 2) Check if thread already exists (A-B or B-A)
+        val forward = threadsRef
+            .whereEqualTo("userA", myId)
+            .whereEqualTo("userB", otherId)
+            .get()
+            .await()
 
-        // 3) Check if a thread already exists
-        val existing = await(
-            threadsCollection
-                .whereEqualTo("userPairKey", pairKey)
-                .limit(1)
-                .get()
-        )
-
-        if (!existing.isEmpty) {
-            return mapThreadDoc(existing.documents.first(), currentUser.uid)
+        if (!forward.isEmpty) {
+            val doc = forward.documents.first()
+            return doc.toChatThread()
         }
 
-        // 4) Otherwise create a new thread
-        val docRef = threadsCollection.document()
-        val now = Timestamp.now()
+        val reverse = threadsRef
+            .whereEqualTo("userA", otherId)
+            .whereEqualTo("userB", myId)
+            .get()
+            .await()
 
-        val data = hashMapOf(
-            "id" to docRef.id,
-            "userIds" to listOf(currentUser.uid, otherUid),
-            "userEmails" to listOf(currentUser.email ?: "", otherEmail),
-            "userNames" to listOf(currentUser.displayName ?: "", otherName),
-            "userPairKey" to pairKey,
+        if (!reverse.isEmpty) {
+            val doc = reverse.documents.first()
+            return doc.toChatThread()
+        }
+
+        // 3) Create new thread
+        val now = System.currentTimeMillis()
+        val newDoc = threadsRef.document()
+
+        val data = mapOf(
+            "userA" to myId,
+            "userB" to otherId,
+            "userAName" to myName,
+            "userBName" to otherName,
+            "participants" to listOf(myId, otherId),
             "lastMessage" to "",
             "lastTimestamp" to now,
-            "createdAt" to now,
-            "unreadCounts" to mapOf(
-                currentUser.uid to 0L,
-                otherUid to 0L
-            )
+            "unread_$myId" to 0L,
+            "unread_$otherId" to 0L
         )
 
-        await(docRef.set(data))
+        newDoc.set(data).await()
 
         return ChatThread(
-            id = docRef.id,
-            otherUserId = otherUid,
-            otherUserName = otherName,
-            otherUserEmail = otherEmail,
+            id = newDoc.id,
+            userA = myId,
+            userB = otherId,
+            userAName = myName,
+            userBName = otherName,
             lastMessage = "",
             lastTimestamp = now,
             unreadCount = 0
         )
     }
 
-    /**
-     * Listen for messages in a given thread.
-     */
+    // -------------------------------------------------------------------------
+    // MESSAGES
+    // -------------------------------------------------------------------------
+
     fun observeMessages(
         threadId: String,
         onUpdate: (List<ChatMessage>) -> Unit
     ): ListenerRegistration {
-        val messagesCollection = threadsCollection
-            .document(threadId)
-            .collection("messages")
 
-        return messagesCollection
-            .orderBy("timestamp")
-            .addSnapshotListener { snapshot, error ->
-                if (error != null) {
-                    Log.e("ChatRepository", "observeMessages failed", error)
-                    onUpdate(emptyList())
+        return messagesRef
+            .whereEqualTo("threadId", threadId)
+            .addSnapshotListener { snap, e ->
+                if (e != null) {
+                    // Log the error but DO NOT clear UI to empty
+                    Log.e("ChatRepository", "observeMessages error", e)
                     return@addSnapshotListener
                 }
 
-                val docs = snapshot?.documents ?: emptyList()
-                val messages = docs.map { doc ->
-                    ChatMessage(
-                        id = doc.id,
-                        threadId = threadId,
-                        senderId = doc.getString("senderId") ?: "",
-                        senderName = doc.getString("senderName") ?: "GirlSpace user",
-                        text = doc.getString("text") ?: "",
-                        createdAt = doc.getTimestamp("timestamp"),
-                        readBy = (doc.get("readBy") as? List<String>).orEmpty()
-                    )
-                }
-                onUpdate(messages)
+                val list = snap
+                    ?.documents
+                    ?.mapNotNull { it.toChatMessage() }
+                    // Sort on client to keep them in chronological order
+                    ?.sortedBy { it.createdAt.seconds }
+                    ?: emptyList()
+
+                onUpdate(list)
             }
     }
 
-    /**
-     * Send a message in a given thread.
-     */
-    suspend fun sendMessage(threadId: String, text: String) {
-        val currentUser = auth.currentUser
-            ?: throw IllegalStateException("User must be logged in to send messages")
 
-        val messagesCollection = threadsCollection
-            .document(threadId)
-            .collection("messages")
+    suspend fun sendMessage(
+        threadId: String,
+        text: String,
+        mediaUrl: String? = null,
+        mediaType: String? = null
+    ) {
+        val uid = currentUid()
+        val name = currentName()
+        if (uid.isEmpty()) throw IllegalStateException("Not logged in")
 
+        val msgDoc = messagesRef.document()
         val now = Timestamp.now()
 
-        // 1) Add message document
-        val messageData = hashMapOf(
-            "senderId" to currentUser.uid,
-            "senderName" to (currentUser.displayName ?: "GirlSpace user"),
+        val msgData = mapOf(
+            "id" to msgDoc.id,
+            "threadId" to threadId,
+            "senderId" to uid,
+            "senderName" to name,
             "text" to text,
-            "timestamp" to now,
-            "readBy" to listOf(currentUser.uid)
+            "mediaUrl" to mediaUrl,
+            "mediaType" to mediaType,
+            "createdAt" to now,
+            "readBy" to listOf(uid),
+            "reactions" to emptyMap<String, String>()
         )
 
-        await(messagesCollection.add(messageData))
+        msgDoc.set(msgData).await()
 
-        // 2) Update thread summary
-        val threadRef = threadsCollection.document(threadId)
-        val threadSnap = await(threadRef.get())
-        val userIds = (threadSnap.get("userIds") as? List<String>).orEmpty()
-
-        // Simple unread count logic: increment all except sender
-        val unreadCounts = (threadSnap.get("unreadCounts") as? Map<String, Long>).orEmpty()
-        val updatedUnread = unreadCounts.toMutableMap()
-        userIds.forEach { uid ->
-            updatedUnread[uid] = if (uid == currentUser.uid) 0L
-            else (unreadCounts[uid] ?: 0L) + 1L
-        }
-
-        await(
-            threadRef.update(
-                mapOf(
-                    "lastMessage" to text,
-                    "lastTimestamp" to now,
-                    "unreadCounts" to updatedUnread
-                )
+        // Update thread summary
+        threadsRef.document(threadId).update(
+            mapOf(
+                "lastMessage" to if (text.isNotBlank()) text else "[Media]",
+                "lastTimestamp" to System.currentTimeMillis()
             )
-        )
+        ).await()
     }
 
-    /* ---------------------------------------------------------
-       Helpers
-    --------------------------------------------------------- */
+    // -------------------------------------------------------------------------
+    // REACTIONS
+    // -------------------------------------------------------------------------
 
-    private fun mapThreadDoc(doc: DocumentSnapshot, currentUid: String): ChatThread {
-        val userIds = (doc.get("userIds") as? List<String>).orEmpty()
-        val userNames = (doc.get("userNames") as? List<String>).orEmpty()
-        val userEmails = (doc.get("userEmails") as? List<String>).orEmpty()
-        val unreadCounts = (doc.get("unreadCounts") as? Map<String, Long>).orEmpty()
+    suspend fun addReaction(
+        messageId: String,
+        userId: String,
+        emoji: String
+    ) {
+        val msgRef = messagesRef.document(messageId)
 
-        val indexOfOther = userIds.indexOfFirst { it != currentUid }.takeIf { it >= 0 } ?: 0
+        firestore.runTransaction { tx ->
+            val snap = tx.get(msgRef)
+            if (!snap.exists()) return@runTransaction
 
-        val otherUserId = userIds.getOrNull(indexOfOther) ?: ""
-        val otherUserName = userNames.getOrNull(indexOfOther) ?: "GirlSpace user"
-        val otherUserEmail = userEmails.getOrNull(indexOfOther) ?: ""
+            @Suppress("UNCHECKED_CAST")
+            val current = snap.get("reactions") as? Map<String, String> ?: emptyMap()
+            val updated = current.toMutableMap()
 
+            if (updated[userId] == emoji) {
+                updated.remove(userId) // tap same emoji → remove
+            } else {
+                updated[userId] = emoji
+            }
+
+            tx.update(msgRef, "reactions", updated as Map<String, Any>)
+        }.await()
+    }
+
+    // -------------------------------------------------------------------------
+    // HELPERS
+    // -------------------------------------------------------------------------
+
+    private fun com.google.firebase.firestore.DocumentSnapshot.toChatThread(): ChatThread {
         return ChatThread(
-            id = doc.getString("id") ?: doc.id,
-            otherUserId = otherUserId,
-            otherUserName = otherUserName,
-            otherUserEmail = otherUserEmail,
-            lastMessage = doc.getString("lastMessage") ?: "",
-            lastTimestamp = doc.getTimestamp("lastTimestamp"),
-            unreadCount = (unreadCounts[currentUid] ?: 0L).toInt()
+            id = id,
+            userA = getString("userA") ?: "",
+            userB = getString("userB") ?: "",
+            userAName = getString("userAName") ?: "",
+            userBName = getString("userBName") ?: "",
+            lastMessage = getString("lastMessage") ?: "",
+            lastTimestamp = getLong("lastTimestamp") ?: 0L,
+            unreadCount = 0 // per-user unread can be computed client-side later
         )
     }
 
-    private suspend fun <T> await(task: Task<T>): T =
-        suspendCancellableCoroutine { cont ->
-            task
-                .addOnSuccessListener { result ->
-                    if (cont.isActive) cont.resume(result)
-                }
-                .addOnFailureListener { e ->
-                    if (cont.isActive) cont.resumeWithException(e)
-                }
+    private fun com.google.firebase.firestore.DocumentSnapshot.toChatMessage(): ChatMessage? {
+        return try {
+            @Suppress("UNCHECKED_CAST")
+            val reactionsMap = get("reactions") as? Map<String, String> ?: emptyMap()
+
+            ChatMessage(
+                id = getString("id") ?: "",
+                threadId = getString("threadId") ?: "",
+                senderId = getString("senderId") ?: "",
+                senderName = getString("senderName") ?: "",
+                text = getString("text") ?: "",
+                mediaUrl = getString("mediaUrl"),
+                mediaType = getString("mediaType"),
+                createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
+                readBy = (get("readBy") as? List<String>) ?: emptyList(),
+                reactions = reactionsMap
+            )
+        } catch (e: Exception) {
+            Log.e("ChatRepository", "toChatMessage failed", e)
+            null
         }
+    }
 }

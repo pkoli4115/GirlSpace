@@ -13,14 +13,20 @@ import com.girlspace.app.ui.home.HomeRoot
 import com.girlspace.app.ui.login.LoginScreen
 import com.girlspace.app.ui.onboarding.MoodOnboardingScreen
 import com.girlspace.app.ui.onboarding.OnboardingViewModel
+import com.girlspace.app.ui.profile.DeleteAccountScreen
 import com.girlspace.app.ui.profile.ProfileScreen
 import com.girlspace.app.ui.splash.SplashScreen
 import com.girlspace.app.ui.splash.SplashViewModel
-import com.girlspace.app.ui.theme.GirlSpaceTheme
+import com.girlspace.app.ui.theme.VibeTheme
 
 @Composable
 fun GirlSpaceApp() {
-    GirlSpaceTheme {
+    // Read selected vibe ("serenity", "radiance", etc.) from DataStore
+    val onboardingViewModel: OnboardingViewModel = hiltViewModel()
+    val themeMode by onboardingViewModel.themeMode.collectAsState()
+
+    // Apply global color scheme based on vibe
+    VibeTheme(themeMode = themeMode) {
         val navController = rememberNavController()
 
         NavHost(
@@ -72,18 +78,20 @@ fun GirlSpaceApp() {
                 MoodOnboardingScreen(
                     viewModel = vm,
                     onNext = {
+                        // Screen itself already calls saveFirstLaunchDone(),
+                        // but calling again is harmless.
                         vm.saveFirstLaunchDone()
                         navController.navigate("home_root") {
                             popUpTo("login") { inclusive = true }
                             launchSingleTop = true
                         }
-                    },
-                    onBack = { navController.popBackStack() }
+                    }
                 )
             }
 
             /* ---------------------------------------------------
-                4) HOME ROOT (Feed / Reels / Chats / Groups / Profile)
+                4) HOME ROOT (Feed / Reels / Chats / Friends /
+                   Communities / Menu)
             ---------------------------------------------------- */
             composable(route = "home_root") {
                 HomeRoot(
@@ -129,18 +137,35 @@ fun GirlSpaceApp() {
             }
 
             /* ---------------------------------------------------
-                7) GROUP CHAT SCREEN
+                7) DELETE ACCOUNT SCREEN
+            ---------------------------------------------------- */
+            composable(route = "deleteAccount") {
+                DeleteAccountScreen(
+                    onBack = { navController.popBackStack() },
+                    onAccountDeleted = {
+                        // After delete, send user to login and clear back stack
+                        navController.navigate("login") {
+                            popUpTo("splash") { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    }
+                )
+            }
+
+            /* ---------------------------------------------------
+                8) GROUP CHAT SCREEN
             ---------------------------------------------------- */
             composable(
                 route = "group_chat/{groupId}/{groupName}"
             ) { backStackEntry ->
                 val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
-                val groupName = backStackEntry.arguments?.getString("groupName") ?: "Group"
+                val groupName =
+                    backStackEntry.arguments?.getString("groupName") ?: "Group"
 
                 GroupChatScreen(
-                    navController = navController,
                     groupId = groupId,
-                    groupName = groupName
+                    groupName = groupName,
+                    onBack = { navController.popBackStack() }
                 )
             }
         }

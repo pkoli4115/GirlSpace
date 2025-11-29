@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.girlspace.app.core.plan.PlanLimitsRepository
 import com.girlspace.app.data.feed.Post
 import com.google.firebase.auth.FirebaseAuth
 import java.text.SimpleDateFormat
@@ -49,7 +50,10 @@ fun FeedScreen(
     val isLoading by vm.isLoading.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val premiumRequired by vm.premiumRequired.collectAsState()
-    val maxImages by vm.currentMaxImages.collectAsState()   // 👈 NEW
+    val maxImages by vm.currentMaxImages.collectAsState()
+
+    val planLimits by PlanLimitsRepository.planLimits.collectAsState()
+    val maxImagesAllowed = planLimits.maxImagesPerPost
 
     val currentUser = FirebaseAuth.getInstance().currentUser
     val context = LocalContext.current
@@ -108,7 +112,8 @@ fun FeedScreen(
                 text = {
                     Text(
                         "Your current plan allows up to $maxImages images per post. " +
-                                "Please upgrade your GirlSpace plan to attach more images."
+                                "Please upgrade your plan in Menu → Manage Subscriptions " +
+                                "to attach more images."
                     )
                 }
             )
@@ -122,6 +127,7 @@ fun FeedScreen(
                     .background(Color.Black.copy(alpha = 0.4f))
             ) {
                 CreatePostScreen(
+                    maxImagesAllowed = maxImagesAllowed,
                     onClose = onDismissCreatePost,
                     onPost = { text, imageUris ->
                         vm.createPost(
@@ -274,19 +280,33 @@ private fun PostCard(
     }
 }
 
+/**
+ * Create Post UI with:
+ *  - image picker
+ *  - inline image-limit warning based on current plan
+ */
 @Composable
 fun CreatePostScreen(
+    maxImagesAllowed: Int,
     onClose: () -> Unit,
     onPost: (String, List<Uri>) -> Unit
 ) {
     val context = LocalContext.current
     var text by remember { mutableStateOf("") }
     var selectedImages by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var limitWarning by remember { mutableStateOf<String?>(null) }
 
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetMultipleContents()
     ) { uris ->
-        selectedImages = uris
+        if (uris.size > maxImagesAllowed) {
+            selectedImages = uris.take(maxImagesAllowed)
+            limitWarning =
+                "Your current plan allows up to $maxImagesAllowed images per post. Extra images were ignored."
+        } else {
+            selectedImages = uris
+            limitWarning = null
+        }
     }
 
     Surface(
@@ -334,6 +354,15 @@ fun CreatePostScreen(
                 }
             }
 
+            // Inline plan warning, if user tried to exceed limit
+            if (limitWarning != null) {
+                Text(
+                    text = limitWarning ?: "",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -354,7 +383,13 @@ fun CreatePostScreen(
 
                 TextButton(
                     onClick = {
-                        onPost(text, selectedImages)
+                        // Extra safety check
+                        if (selectedImages.size > maxImagesAllowed) {
+                            limitWarning =
+                                "Your current plan allows up to $maxImagesAllowed images per post."
+                        } else {
+                            onPost(text, selectedImages)
+                        }
                     }
                 ) {
                     Text("Post")
@@ -362,8 +397,7 @@ fun CreatePostScreen(
             }
 
             Text(
-                text = "Tip: Free users can attach 1 image per post. " +
-                        "Basic and Premium members can attach more images.",
+                text = "Your current plan allows up to $maxImagesAllowed images per post.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

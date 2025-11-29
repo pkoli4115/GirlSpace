@@ -91,7 +91,8 @@ fun LoginScreen(
                             handleAuthSuccess(
                                 navController = navController,
                                 firebaseAuth = firebaseAuth,
-                                provider = "google"
+                                provider = "google",
+                                phoneNumberOverride = null
                             )
                         } else {
                             Log.e(
@@ -142,7 +143,8 @@ fun LoginScreen(
                                 handleAuthSuccess(
                                     navController = navController,
                                     firebaseAuth = firebaseAuth,
-                                    provider = "facebook"
+                                    provider = "facebook",
+                                    phoneNumberOverride = null
                                 )
                             } else {
                                 Log.e(
@@ -260,8 +262,11 @@ fun LoginScreen(
             Button(
                 modifier = Modifier.fillMaxWidth(),
                 onClick = {
-                    val signInIntent = googleSignInClient.signInIntent
-                    googleLauncher.launch(signInIntent)
+                    // Clear last Google account so picker shows
+                    googleSignInClient.signOut().addOnCompleteListener {
+                        val signInIntent = googleSignInClient.signInIntent
+                        googleLauncher.launch(signInIntent)
+                    }
                 }
             ) {
                 Text("Continue with Google")
@@ -390,7 +395,7 @@ fun LoginScreen(
     }
 }
 
-// Save user profile and go to onboarding
+// After any successful login: save profile + decide Home vs Onboarding per user
 private fun handleAuthSuccess(
     navController: NavHostController,
     firebaseAuth: FirebaseAuth,
@@ -399,12 +404,41 @@ private fun handleAuthSuccess(
 ) {
     val user = firebaseAuth.currentUser
     saveUserProfileToFirestore(user, provider, phoneNumberOverride)
-    onAnyLoginSuccess(navController)
+
+    if (user == null) return
+    val db = FirebaseFirestore.getInstance()
+    val uid = user.uid
+
+    db.collection("users").document(uid)
+        .get()
+        .addOnSuccessListener { snapshot ->
+            val hasVibe = snapshot.getBoolean("hasVibe") ?: false
+            if (hasVibe) {
+                // Already chose vibe earlier → go straight to Home
+                navController.navigate("home_root") {
+                    popUpTo("login") { inclusive = true }
+                    launchSingleTop = true
+                }
+            } else {
+                // New user (or never picked vibe) → go to onboarding
+                navController.navigate("onboarding") {
+                    popUpTo("login") { inclusive = true }
+                    launchSingleTop = true
+                }
+            }
+        }
+        .addOnFailureListener { e ->
+            Log.e("GirlSpace", "Failed to read hasVibe flag", e)
+            // Safe fallback: send to onboarding
+            navController.navigate("onboarding") {
+                popUpTo("login") { inclusive = true }
+                launchSingleTop = true
+            }
+        }
 }
 
 // Create/update /users/{uid} document with basic info
-// NEW: add isPremium=false ONLY for brand-new users
-// Create/update /users/{uid} document with basic info
+// For new users, also default hasVibe = false
 private fun saveUserProfileToFirestore(
     user: FirebaseUser?,
     provider: String,
@@ -416,13 +450,13 @@ private fun saveUserProfileToFirestore(
     val uid = user.uid
     val userDocRef = db.collection("users").document(uid)
 
-    // First read existing doc so we don't overwrite plan/isPremium for old users
     userDocRef.get()
         .addOnSuccessListener { snapshot ->
             val alreadyExists = snapshot.exists()
 
             val existingPlan = snapshot.getString("plan")
             val existingIsPremium = snapshot.getBoolean("isPremium")
+            val existingHasVibe = snapshot.getBoolean("hasVibe")
 
             val profile = hashMapOf(
                 "uid" to uid,
@@ -430,12 +464,17 @@ private fun saveUserProfileToFirestore(
                 "email" to (user.email ?: ""),
                 "phone" to (phoneNumberOverride ?: user.phoneNumber ?: ""),
                 "provider" to provider,
-                "photoUrl" to (user.photoUrl?.toString() ?: ""),
                 "updatedAt" to FieldValue.serverTimestamp()
             ).apply {
-                // ✅ NEW: only set defaults when the document is new / fields missing
+                // 📌 Preserve existing photoUrl if it exists (from Firestore)
+                val existingPhoto = snapshot.getString("photoUrl")
+                put("photoUrl", existingPhoto ?: (user.photoUrl?.toString() ?: ""))
+            }
+                .apply {
                 put("plan", existingPlan ?: "free")
                 put("isPremium", existingIsPremium ?: false)
+                // Only default hasVibe=false when doc is new or field missing
+                put("hasVibe", existingHasVibe ?: false)
             }
 
             userDocRef.set(profile, SetOptions.merge())
@@ -449,13 +488,4 @@ private fun saveUserProfileToFirestore(
         .addOnFailureListener { e ->
             Log.e("GirlSpace", "Failed to fetch existing user profile", e)
         }
-}
-
-
-// After any login is successful, go to onboarding flow
-private fun onAnyLoginSuccess(navController: NavHostController) {
-    navController.navigate("onboarding") {
-        popUpTo("login") { inclusive = true }
-        launchSingleTop = true
-    }
 }
