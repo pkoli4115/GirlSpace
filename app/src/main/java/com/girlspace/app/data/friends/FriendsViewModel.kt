@@ -39,6 +39,9 @@ data class FriendsUiState(
     val suggestions: List<FriendUserSummary> = emptyList(),
     val outgoingRequestIds: Set<String> = emptySet(),
 
+    // 🔹 mutual friend count per suggested user
+    val mutualFriendsCounts: Map<String, Int> = emptyMap(),
+
     // Search
     val searchQuery: String = "",
     val searchResults: List<SearchResultUser> = emptyList(),
@@ -70,6 +73,8 @@ class FriendsViewModel @Inject constructor(
         viewModelScope.launch {
             friendRepository.observeFriends().collect { list ->
                 _uiState.update { it.copy(friends = list) }
+                // Friends changed → suggestions ranking may change
+                loadSuggestions()
             }
         }
     }
@@ -100,6 +105,8 @@ class FriendsViewModel @Inject constructor(
      *  - except current user
      *  - except already friends
      *  - except blocked
+     *  - compute mutual friends with each candidate
+     *  - rank by mutual friends desc
      */
     fun loadSuggestions() {
         viewModelScope.launch {
@@ -107,8 +114,8 @@ class FriendsViewModel @Inject constructor(
             _uiState.update { it.copy(isLoading = true, error = null) }
 
             try {
-                // Current friends
-                val friendIds = _uiState.value.friends.map { it.uid }.toSet()
+                // My friends (for mutual friend intersection)
+                val myFriendIds = _uiState.value.friends.map { it.uid }.toSet()
 
                 // Blocked users
                 val blockedSnap = db.collection("blocked_users")
@@ -118,17 +125,37 @@ class FriendsViewModel @Inject constructor(
                     .await()
                 val blockedIds = blockedSnap.documents.map { it.id }.toSet()
 
-                // All users (small limit is fine for V1)
+                // All users (capped for V1)
                 val usersSnap = db.collection("users")
                     .limit(200)
                     .get()
                     .await()
 
-                val suggestions = usersSnap.documents.mapNotNull { doc ->
+                val mutualCounts = mutableMapOf<String, Int>()
+
+                val suggestionsRaw = usersSnap.documents.mapNotNull { doc ->
                     val uid = doc.id
                     if (uid == currentUser.uid) return@mapNotNull null
-                    if (uid in friendIds) return@mapNotNull null
+                    if (uid in myFriendIds) return@mapNotNull null
                     if (uid in blockedIds) return@mapNotNull null
+
+                    // Compute mutual friends for this candidate
+                    val theirFriendsSnap = db.collection("friends")
+                        .document(uid)
+                        .collection("list")
+                        .get()
+                        .await()
+
+                    val theirFriendIds = theirFriendsSnap.documents
+                        .mapNotNull { it.getString("friendUid") }
+                        .toSet()
+
+                    val mutualCount = if (myFriendIds.isEmpty()) {
+                        0
+                    } else {
+                        myFriendIds.intersect(theirFriendIds).size
+                    }
+                    mutualCounts[uid] = mutualCount
 
                     FriendUserSummary(
                         uid = uid,
@@ -139,9 +166,16 @@ class FriendsViewModel @Inject constructor(
                     )
                 }
 
+                // Rank by mutual friends desc, then by name as tiebreaker
+                val sortedSuggestions = suggestionsRaw.sortedWith(
+                    compareByDescending<FriendUserSummary> { mutualCounts[it.uid] ?: 0 }
+                        .thenBy { it.fullName.lowercase() }
+                )
+
                 _uiState.update {
                     it.copy(
-                        suggestions = suggestions,
+                        suggestions = sortedSuggestions,
+                        mutualFriendsCounts = mutualCounts,
                         isLoading = false
                     )
                 }
@@ -232,6 +266,7 @@ class FriendsViewModel @Inject constructor(
                 friendRepository.blockUser(targetUid)
                 // Remove from friends + suggestions instantly
                 hideSuggestion(targetUid)
+                loadSuggestions()
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message ?: "Failed to block user") }
             }

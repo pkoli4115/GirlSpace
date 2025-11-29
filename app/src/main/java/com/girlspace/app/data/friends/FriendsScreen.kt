@@ -1,5 +1,6 @@
 package com.girlspace.app.ui.friends
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -85,6 +86,7 @@ fun FriendsScreen(
                     suggestions = uiState.suggestions,
                     outgoingRequestIds = uiState.outgoingRequestIds,
                     friends = uiState.friends,
+                    mutualCounts = uiState.mutualFriendsCounts,
                     onConfirm = viewModel::sendFriendRequest,
                     onDecline = viewModel::hideSuggestion
                 )
@@ -210,6 +212,7 @@ private fun SuggestionsTab(
     suggestions: List<FriendUserSummary>,
     outgoingRequestIds: Set<String>,
     friends: List<FriendUserSummary>,
+    mutualCounts: Map<String, Int>,
     onConfirm: (String) -> Unit,
     onDecline: (String) -> Unit
 ) {
@@ -232,6 +235,7 @@ private fun SuggestionsTab(
         items(suggestions, key = { it.uid }) { user ->
             val isFriend = friendIds.contains(user.uid)
             val hasRequested = outgoingRequestIds.contains(user.uid)
+            val mutual = mutualCounts[user.uid] ?: 0
 
             Column(
                 modifier = Modifier
@@ -244,6 +248,15 @@ private fun SuggestionsTab(
                         fontWeight = FontWeight.SemiBold
                     )
                 )
+
+                if (mutual > 0) {
+                    Text(
+                        text = if (mutual == 1) "1 mutual friend" else "$mutual mutual friends",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp)
+                    )
+                }
 
                 Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
