@@ -13,8 +13,8 @@ class ChatRepository(
 ) {
 
     // IMPORTANT: match your Firestore collection names
-    private val threadsRef = firestore.collection("chatThreads")     // <- fixed
-    private val messagesRef = firestore.collection("chat_messages")  // already exists
+    private val threadsRef = firestore.collection("chatThreads")     // <- SAME as your existing
+    private val messagesRef = firestore.collection("chat_messages")  // <- SAME as your existing
 
     private fun currentUid(): String = auth.currentUser?.uid ?: ""
     private fun currentName(): String = auth.currentUser?.displayName ?: "GirlSpace user"
@@ -27,6 +27,7 @@ class ChatRepository(
         val uid = currentUid()
         if (uid.isEmpty()) {
             onUpdate(emptyList())
+            // Return a dummy listener if not logged in
             return firestore.collection("dummy").addSnapshotListener { _, _ -> }
         }
 
@@ -52,6 +53,7 @@ class ChatRepository(
                     )
                 } ?: emptyList()
 
+                // Newest chats first
                 onUpdate(list.sortedByDescending { it.lastTimestamp })
             }
     }
@@ -164,12 +166,23 @@ class ChatRepository(
             }
     }
 
-
+    /**
+     * Send a message in a thread.
+     *
+     * - text: regular text content
+     * - mediaUrl/mediaType: for images, videos, audio, files
+     * - replyTo: messageId being replied to (for reply UI)
+     * - audioDuration: for voice messages (ms)
+     * - mediaThumbnail: preview image URL for video (optional)
+     */
     suspend fun sendMessage(
         threadId: String,
         text: String,
         mediaUrl: String? = null,
-        mediaType: String? = null
+        mediaType: String? = null,
+        replyTo: String? = null,
+        audioDuration: Long? = null,
+        mediaThumbnail: String? = null
     ) {
         val uid = currentUid()
         val name = currentName()
@@ -178,7 +191,7 @@ class ChatRepository(
         val msgDoc = messagesRef.document()
         val now = Timestamp.now()
 
-        val msgData = mapOf(
+        val msgData = mutableMapOf<String, Any?>(
             "id" to msgDoc.id,
             "threadId" to threadId,
             "senderId" to uid,
@@ -188,15 +201,25 @@ class ChatRepository(
             "mediaType" to mediaType,
             "createdAt" to now,
             "readBy" to listOf(uid),
-            "reactions" to emptyMap<String, String>()
+            "reactions" to emptyMap<String, String>(),
+            "replyTo" to replyTo,
+            "audioDuration" to audioDuration,
+            "mediaThumbnail" to mediaThumbnail
         )
 
-        msgDoc.set(msgData).await()
+        // Firestore ignores nulls if we filter them out
+        val cleaned = msgData.filterValues { it != null }
+
+        msgDoc.set(cleaned).await()
 
         // Update thread summary
         threadsRef.document(threadId).update(
             mapOf(
-                "lastMessage" to if (text.isNotBlank()) text else "[Media]",
+                "lastMessage" to when {
+                    text.isNotBlank() -> text
+                    mediaType != null -> "[${mediaType}]"
+                    else -> "[Message]"
+                },
                 "lastTimestamp" to System.currentTimeMillis()
             )
         ).await()
@@ -261,6 +284,9 @@ class ChatRepository(
                 text = getString("text") ?: "",
                 mediaUrl = getString("mediaUrl"),
                 mediaType = getString("mediaType"),
+                mediaThumbnail = getString("mediaThumbnail"),
+                audioDuration = getLong("audioDuration"),
+                replyTo = getString("replyTo"),
                 createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
                 readBy = (get("readBy") as? List<String>) ?: emptyList(),
                 reactions = reactionsMap

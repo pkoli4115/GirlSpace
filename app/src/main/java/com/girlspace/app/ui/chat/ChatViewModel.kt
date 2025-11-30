@@ -1,4 +1,7 @@
 package com.girlspace.app.ui.chat
+import  com.google.firebase.firestore.FieldValue
+import java.io.File
+import android.provider.OpenableColumns
 
 import android.content.Context
 import android.net.Uri
@@ -8,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.girlspace.app.data.chat.ChatMessage
 import com.girlspace.app.data.chat.ChatRepository
 import com.girlspace.app.data.chat.ChatThread
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
@@ -36,6 +40,7 @@ class ChatViewModel : ViewModel() {
     private var typingListener: ListenerRegistration? = null
     private var presenceListener: ListenerRegistration? = null
 
+    // Threads
     private val _threads = MutableStateFlow<List<ChatThread>>(emptyList())
     val threads: StateFlow<List<ChatThread>> = _threads
 
@@ -45,8 +50,13 @@ class ChatViewModel : ViewModel() {
     private val _selectedThread = MutableStateFlow<ChatThread?>(null)
     val selectedThread: StateFlow<ChatThread?> = _selectedThread
 
+    // Messages (with simple pagination)
+    private val _allMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
+
+    private var loadedMessageCount: Int = 30
+    private val pageSize: Int = 30
 
     private val _inputText = MutableStateFlow("")
     val inputText: StateFlow<String> = _inputText
@@ -97,6 +107,10 @@ class ChatViewModel : ViewModel() {
     private val _contactSearchResults =
         MutableStateFlow<List<ChatUserSummary>>(emptyList())
     val contactSearchResults: StateFlow<List<ChatUserSummary>> = _contactSearchResults
+
+    // For avatar tap → open chat
+    private val _lastStartedThread = MutableStateFlow<ChatThread?>(null)
+    val lastStartedThread: StateFlow<ChatThread?> = _lastStartedThread
 
     init {
         listenThreads()
@@ -385,6 +399,7 @@ class ChatViewModel : ViewModel() {
                 _isStartingChat.value = true
                 val thread = repo.startOrGetThreadByEmail(email)
                 selectThread(thread)
+                _lastStartedThread.value = thread
                 markUserActive()
             } catch (e: Exception) {
                 _errorMessage.value = e.message
@@ -402,7 +417,8 @@ class ChatViewModel : ViewModel() {
             try {
                 _isStartingChat.value = true
 
-                val threadsRef = firestore.collection("threads")
+                // Use same "chatThreads" collection as repository
+                val threadsRef = firestore.collection("chatThreads")
 
                 val existingAB = threadsRef
                     .whereEqualTo("userA", myUid)
@@ -443,22 +459,36 @@ class ChatViewModel : ViewModel() {
                             ?: "GirlSpace user"
 
                     val newDoc = threadsRef.document()
-                    val newThread = ChatThread(
+                    val now = System.currentTimeMillis()
+
+                    val data = mapOf(
+                        "userA" to myUid,
+                        "userB" to otherUid,
+                        "userAName" to myName,
+                        "userBName" to otherName,
+                        "participants" to listOf(myUid, otherUid),
+                        "lastMessage" to "",
+                        "lastTimestamp" to now,
+                        "unread_$myUid" to 0L,
+                        "unread_$otherUid" to 0L
+                    )
+
+                    newDoc.set(data).await()
+
+                    ChatThread(
                         id = newDoc.id,
                         userA = myUid,
                         userB = otherUid,
                         userAName = myName,
                         userBName = otherName,
                         lastMessage = "",
-                        lastTimestamp = System.currentTimeMillis(),
+                        lastTimestamp = now,
                         unreadCount = 0
                     )
-
-                    newDoc.set(newThread).await()
-                    newThread
                 }
 
                 selectThread(thread)
+                _lastStartedThread.value = thread
                 markUserActive()
             } catch (e: Exception) {
                 Log.e("ChatViewModel", "startChatWithUser failed", e)
@@ -467,6 +497,10 @@ class ChatViewModel : ViewModel() {
                 _isStartingChat.value = false
             }
         }
+    }
+
+    fun consumeLastStartedThread() {
+        _lastStartedThread.value = null
     }
 
     // Ensure correct thread selected when entering via route "chat/{threadId}"
@@ -480,7 +514,7 @@ class ChatViewModel : ViewModel() {
         } else {
             viewModelScope.launch {
                 try {
-                    val snap = firestore.collection("threads")
+                    val snap = firestore.collection("chatThreads")
                         .document(threadId)
                         .get()
                         .await()
@@ -503,7 +537,13 @@ class ChatViewModel : ViewModel() {
 
         msgListener?.remove()
         msgListener = repo.observeMessages(thread.id) { msgs ->
-            _messages.value = msgs
+            _allMessages.value = msgs
+
+            // pagination: keep last [loadedMessageCount]
+            val slice = msgs.takeLast(loadedMessageCount)
+            _messages.value = slice
+
+            markMessagesAsReadForCurrentUser(slice)
         }
 
         _isTyping.value = false
@@ -610,6 +650,48 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    // Pagination: load older messages
+    fun loadMoreMessages() {
+        val all = _allMessages.value
+        val current = _messages.value
+        if (all.size <= current.size) return
+
+        loadedMessageCount = (loadedMessageCount + pageSize)
+            .coerceAtMost(all.size)
+
+        _messages.value = all.takeLast(loadedMessageCount)
+    }
+
+    // Mark messages as read for ticks
+    private fun markMessagesAsReadForCurrentUser(msgs: List<ChatMessage>) {
+        val uid = auth.currentUser?.uid ?: return
+
+        viewModelScope.launch {
+            try {
+                msgs
+                    .filter { it.senderId != uid && !it.readBy.contains(uid) }
+                    .forEach { msg ->
+                        // Prefer msg.threadId, fall back to selected thread
+                        val threadId = if (msg.threadId.isNotBlank()) {
+                            msg.threadId
+                        } else {
+                            _selectedThread.value?.id ?: return@forEach
+                        }
+
+                        firestore.collection("chatThreads")
+                            .document(threadId)
+                            .collection("messages")
+                            .document(msg.id)
+                            .update("readBy", FieldValue.arrayUnion(uid))
+                            .await()
+                    }
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "markMessagesAsReadForCurrentUser failed", e)
+            }
+        }
+    }
+
+
     // -------------------------------------------------------------
     // TYPING STATE
     // -------------------------------------------------------------
@@ -702,21 +784,116 @@ class ChatViewModel : ViewModel() {
     }
 
     // -------------------------------------------------------------
-    // MEDIA SEND
+    // MEDIA SEND (gallery / file picker / voice notes)
+    // ------------------------------------------------------------
     // -------------------------------------------------------------
+    // VOICE NOTE SEND (file path from ChatScreen)
+    // -------------------------------------------------------------
+    fun sendVoiceNote(filePath: String) {
+        val thread = _selectedThread.value ?: return
+
+        viewModelScope.launch {
+            try {
+                val file = File(filePath)
+                if (!file.exists()) {
+                    _errorMessage.value = "Voice note file not found"
+                    return@launch
+                }
+
+                val bytes = withContext(Dispatchers.IO) {
+                    file.readBytes()
+                }
+
+                val sizeMb = bytes.size / (1024f * 1024f)
+
+                val plan = _currentPlan.value
+                val maxSize = when (plan) {
+                    "premium" -> 5f
+                    "basic" -> 2f
+                    else -> 2f
+                }
+
+                if (sizeMb > maxSize) {
+                    _errorMessage.value =
+                        "Voice note too large for your plan. Max allowed: ${maxSize}MB"
+                    return@launch
+                }
+
+                val ref = storage.reference.child(
+                    "chat_media/${System.currentTimeMillis()}_voice.m4a"
+                )
+                ref.putBytes(bytes).await()
+                val url = ref.downloadUrl.await().toString()
+
+                repo.sendMessage(
+                    threadId = thread.id,
+                    text = "",
+                    mediaUrl = url,
+                    mediaType = "audio"
+                )
+
+                markUserActive()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message ?: "Failed to send voice note"
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+// MEDIA SEND (gallery / file picker / voice notes)
+// -------------------------------------------------------------
+// -------------------------------------------------------------
+// MEDIA SEND (gallery / file picker / voice notes)
+// -------------------------------------------------------------
     fun sendMedia(context: Context, uri: Uri) {
         val thread = _selectedThread.value ?: return
 
         viewModelScope.launch {
             try {
-                val file = withContext(Dispatchers.IO) {
+                val mime = context.contentResolver.getType(uri)
+                val pathLower = uri.toString().lowercase()
+
+                // Detect type
+                val isVideo = mime?.startsWith("video/") == true ||
+                        pathLower.endsWith(".mp4") ||
+                        pathLower.endsWith(".mov") ||
+                        pathLower.contains("video")
+
+                val isAudio = mime?.startsWith("audio/") == true ||
+                        pathLower.endsWith(".m4a") ||
+                        pathLower.endsWith(".aac") ||
+                        pathLower.endsWith(".mp3") ||
+                        pathLower.contains("audio")
+
+                val isImage = mime?.startsWith("image/") == true ||
+                        pathLower.endsWith(".jpg") ||
+                        pathLower.endsWith(".jpeg") ||
+                        pathLower.endsWith(".png") ||
+                        pathLower.endsWith(".webp")
+
+                // ⭐ Everything else is a generic file (PDF, Word, etc.)
+                val mediaType = when {
+                    isVideo -> "video"
+                    isAudio -> "audio"
+                    isImage -> "image"
+                    else    -> "file"
+                }
+
+                // 👉 Get original display name (for files we show this)
+                val displayName = withContext(Dispatchers.IO) {
+                    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIndex != -1 && cursor.moveToFirst()) {
+                            cursor.getString(nameIndex)
+                        } else null
+                    }
+                }
+
+                val fileBytes = withContext(Dispatchers.IO) {
                     context.contentResolver.openInputStream(uri)?.readBytes()
                 } ?: throw Exception("Unable to read file")
 
-                val sizeMb = file.size / (1024f * 1024f)
-
-                val isVideo = uri.toString().contains(".mp4", ignoreCase = true)
-                        || uri.toString().contains("video", ignoreCase = true)
+                val sizeMb = fileBytes.size / (1024f * 1024f)
 
                 val plan = _currentPlan.value
                 val maxSize = when (plan) {
@@ -736,9 +913,90 @@ class ChatViewModel : ViewModel() {
                     return@launch
                 }
 
-                val extension = if (isVideo) "mp4" else "jpg"
+                val extension = when {
+                    mime != null && mime.contains("/") -> mime.substringAfter("/")
+                    pathLower.endsWith(".pdf") -> "pdf"
+                    pathLower.endsWith(".docx") -> "docx"
+                    pathLower.endsWith(".doc") -> "doc"
+                    pathLower.endsWith(".pptx") -> "pptx"
+                    pathLower.endsWith(".ppt") -> "ppt"
+                    pathLower.endsWith(".xlsx") -> "xlsx"
+                    pathLower.endsWith(".xls") -> "xls"
+                    isVideo -> "mp4"
+                    isAudio -> "m4a"
+                    isImage -> "jpg"
+                    else -> "bin"
+                }
+
                 val ref = storage.reference.child(
-                    "chat_media/${System.currentTimeMillis()}.$extension"
+                    "chat_media/${System.currentTimeMillis()}_${mediaType}.$extension"
+                )
+                ref.putBytes(fileBytes).await()
+                val url = ref.downloadUrl.await().toString()
+
+                // 👉 For files, we store the *real* filename in text.
+                val messageText = if (mediaType == "file") {
+                    displayName ?: "File"
+                } else {
+                    ""
+                }
+
+                repo.sendMessage(
+                    threadId = thread.id,
+                    text = messageText,
+                    mediaUrl = url,
+                    mediaType = mediaType
+                )
+
+                markUserActive()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message ?: "Failed to send media"
+                Log.e("Chat", "Media send failed", e)
+            }
+        }
+    }
+
+
+    // -------------------------------------------------------------
+    // MEDIA SEND (camera capture → still image)
+    // Used by CameraCaptureScreen: vm.sendCapturedImage(context, uri, threadId)
+    // -------------------------------------------------------------
+    fun sendCapturedImage(context: Context, uri: Uri, threadId: String) {
+        // Safety: make sure we are on the correct thread
+        if (_selectedThread.value?.id != threadId) {
+            // If needed you could call ensureThreadSelected(threadId) here
+            // but usually the user is already in that thread.
+        }
+
+        viewModelScope.launch {
+            val thread = _selectedThread.value
+            if (thread == null || thread.id != threadId) {
+                Log.w("ChatViewModel", "sendCapturedImage: no matching thread selected")
+                return@launch
+            }
+
+            try {
+                val file = withContext(Dispatchers.IO) {
+                    context.contentResolver.openInputStream(uri)?.readBytes()
+                } ?: throw Exception("Unable to read captured image")
+
+                val sizeMb = file.size / (1024f * 1024f)
+
+                val plan = _currentPlan.value
+                val maxSize = when (plan) {
+                    "premium" -> 5f
+                    "basic" -> 2f
+                    else -> 2f
+                }
+
+                if (sizeMb > maxSize) {
+                    _errorMessage.value =
+                        "Image too large for your plan. Max allowed: ${maxSize}MB"
+                    return@launch
+                }
+
+                val ref = storage.reference.child(
+                    "chat_media/${System.currentTimeMillis()}_camera.jpg"
                 )
                 ref.putBytes(file).await()
                 val url = ref.downloadUrl.await().toString()
@@ -747,13 +1005,13 @@ class ChatViewModel : ViewModel() {
                     threadId = thread.id,
                     text = "",
                     mediaUrl = url,
-                    mediaType = if (isVideo) "video" else "image"
+                    mediaType = "image"
                 )
 
                 markUserActive()
             } catch (e: Exception) {
-                _errorMessage.value = e.message ?: "Failed to send media"
-                Log.e("Chat", "Media send failed", e)
+                _errorMessage.value = e.message ?: "Failed to send captured image"
+                Log.e("Chat", "sendCapturedImage failed", e)
             }
         }
     }
@@ -781,6 +1039,79 @@ class ChatViewModel : ViewModel() {
                 )
             } catch (e: Exception) {
                 _errorMessage.value = e.message
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // DELETE / UNSEND
+    // -------------------------------------------------------------
+    fun deleteMessageForMe(messageId: String) {
+        val threadId = _selectedThread.value?.id ?: return
+
+        viewModelScope.launch {
+            try {
+                // For now: hard delete from Firestore
+                firestore.collection("chatThreads")
+                    .document(threadId)
+                    .collection("messages")
+                    .document(messageId)
+                    .delete()
+                    .await()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message
+                Log.e("ChatViewModel", "deleteMessageForMe failed", e)
+            }
+        }
+    }
+
+    fun unsendMessage(messageId: String) {
+        val threadId = _selectedThread.value?.id ?: return
+
+        viewModelScope.launch {
+            try {
+                // For now: also hard delete (we can later change this to placeholder text)
+                firestore.collection("chatThreads")
+                    .document(threadId)
+                    .collection("messages")
+                    .document(messageId)
+                    .delete()
+                    .await()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message
+                Log.e("ChatViewModel", "unsendMessage failed", e)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // SPAM / REPORT (chat-level)
+    // -------------------------------------------------------------
+    fun reportChat(reason: String?) {
+        val thread = _selectedThread.value ?: return
+        val reporterId = auth.currentUser?.uid ?: return
+
+        val otherId = when (reporterId) {
+            thread.userA -> thread.userB
+            thread.userB -> thread.userA
+            else -> thread.userB
+        }
+
+        viewModelScope.launch {
+            try {
+                val data = mapOf(
+                    "threadId" to thread.id,
+                    "reporterId" to reporterId,
+                    "reportedUserId" to otherId,
+                    "reason" to (reason ?: ""),
+                    "createdAt" to Timestamp.now()
+                )
+                firestore.collection("chat_reports")
+                    .add(data)
+                    .await()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "reportChat failed", e)
+                _errorMessage.value = "Failed to submit report"
             }
         }
     }

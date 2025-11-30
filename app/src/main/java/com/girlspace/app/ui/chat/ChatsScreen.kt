@@ -89,6 +89,7 @@ fun ChatsScreen(
     val suggestions by vm.suggestions.collectAsState()
     val allThreads by vm.threads.collectAsState()
     val error by vm.errorMessage.collectAsState()
+    val lastStartedThread by vm.lastStartedThread.collectAsState()
 
     val context = LocalContext.current
     val myId = FirebaseAuth.getInstance().currentUser?.uid ?: ""
@@ -100,6 +101,14 @@ fun ChatsScreen(
     LaunchedEffect(error) {
         if (!error.isNullOrBlank()) {
             Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // When a new thread is started from avatar tap, navigate to it
+    LaunchedEffect(lastStartedThread) {
+        lastStartedThread?.let { thread ->
+            onOpenThread(thread)
+            vm.consumeLastStartedThread()
         }
     }
 
@@ -155,13 +164,17 @@ fun ChatsScreen(
         }
     }
 
+    // Presence map for threads list
+    val presenceMap: Map<String, Boolean> = remember(friends, suggestions) {
+        (friends + suggestions).associate { it.uid to it.isOnline }
+    }
+
     // Auto-scrolling state for avatars row
     val avatarListState = rememberLazyListState()
 
     LaunchedEffect(peopleRow.size) {
         if (peopleRow.size > 1) {
             while (true) {
-                // small step scroll
                 avatarListState.animateScrollBy(2f)
 
                 val lastVisibleIndex =
@@ -245,7 +258,7 @@ fun ChatsScreen(
                                 .width(64.dp)
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable {
-                                    // Start / open chat
+                                    // Start / open chat (thread + navigate via lastStartedThread)
                                     vm.startChatWithUser(user.uid)
                                 },
                             horizontalAlignment = Alignment.CenterHorizontally
@@ -295,9 +308,13 @@ fun ChatsScreen(
                         items = threads,
                         key = { it.id }
                     ) { thread ->
+                        val otherId = thread.otherUserId(myId)
+                        val isOnline = presenceMap[otherId] ?: false
+
                         ChatThreadRow(
                             thread = thread,
                             myId = myId,
+                            isOnline = isOnline,
                             onClick = {
                                 vm.selectThread(thread)
                                 onOpenThread(thread)
@@ -378,6 +395,7 @@ private fun ChatUserAvatar(
 private fun ChatThreadRow(
     thread: ChatThread,
     myId: String,
+    isOnline: Boolean,
     onClick: () -> Unit
 ) {
     val displayName = thread.otherUserName(myId)
@@ -397,18 +415,34 @@ private fun ChatThreadRow(
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // simple initial avatar
+        // avatar with online/offline dot
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                .size(40.dp),
             contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = displayName.firstOrNull()?.uppercase() ?: "G",
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = displayName.firstOrNull()?.uppercase() ?: "G",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(9.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (isOnline) Color(0xFF4CAF50) else Color(0xFFB0BEC5)
+                    )
             )
         }
 

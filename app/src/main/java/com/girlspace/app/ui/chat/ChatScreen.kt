@@ -1,11 +1,24 @@
 package com.girlspace.app.ui.chat
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import android.Manifest
+import android.app.Activity
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.media.MediaRecorder
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,19 +32,28 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -44,25 +66,43 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import com.girlspace.app.R
 import com.girlspace.app.data.chat.ChatMessage
 import com.girlspace.app.ui.chat.components.ReactionBar
 import com.google.firebase.auth.FirebaseAuth
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+private enum class PermissionType {
+    CAMERA, AUDIO, STORAGE
+}
+
+private data class AttachedMedia(
+    val uri: Uri,
+    val type: String // image, video, audio, file
+)
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -79,52 +119,47 @@ fun ChatScreen(
     val selectedMsgForReaction by vm.selectedMessageForReaction.collectAsState()
     val isSending by vm.isSending.collectAsState()
 
-    // 🔹 Presence
     val isOtherOnline by vm.isOtherOnline.collectAsState()
     val lastSeenText by vm.lastSeenText.collectAsState()
 
     val context = LocalContext.current
+    val activity = context as? Activity
     val currentUid = FirebaseAuth.getInstance().currentUser?.uid
 
-    // 🔊 Bee / pop sound for reactions + new incoming messages
     val reactionPlayer = remember {
         MediaPlayer.create(context, R.raw.reaction_bee)
     }
 
-    // Track last message id to detect NEW incoming messages
-    var lastMessageId by remember { mutableStateOf<String?>(null) }
+    // Voice note recording
+    var isRecording by remember { mutableStateOf(false) }
+    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var audioFilePath by remember { mutableStateOf<String?>(null) }
 
-    // Play sound when a NEW message arrives from the *other* user
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            val latest = messages.last()
-            if (latest.id != lastMessageId && latest.senderId != currentUid) {
-                try {
-                    if (reactionPlayer.isPlaying) {
-                        reactionPlayer.seekTo(0)
-                    }
-                    reactionPlayer.start()
-                } catch (_: Exception) {
-                }
-            }
-            lastMessageId = latest.id
-        }
-    }
+    // Audio playback
+    var audioPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+    var currentlyPlayingId by remember { mutableStateOf<String?>(null) }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            try {
-                reactionPlayer.release()
-            } catch (_: Exception) {
-            }
-        }
-    }
+    var lastMessageIdForSound by remember { mutableStateOf<String?>(null) }
+    var lastMessageIdForScroll by remember { mutableStateOf<String?>(null) }
 
-    // Full emoji picker state
-    var showEmojiPicker by remember { mutableStateOf(false) }
-    var emojiPickerTargetId by remember { mutableStateOf<String?>(null) }
+    var replyTo by remember { mutableStateOf<ChatMessage?>(null) }
+    // Long-press actions on *my* messages
+    var messageForActions by remember { mutableStateOf<ChatMessage?>(null) }
 
-    // Ensure correct thread is selected when opened via route "chat/{threadId}"
+    var showComposerEmoji by remember { mutableStateOf(false) }
+    var showMoreActions by remember { mutableStateOf(false) }
+
+    var highlightedMessageId by remember { mutableStateOf<String?>(null) }
+    var showPermissionSettingsFor by remember { mutableStateOf<PermissionType?>(null) }
+
+    val attachedMedia = remember { mutableStateListOf<AttachedMedia>() }
+
+    var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingStorageAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingAudioAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+
+    var cameraImageUri by remember { mutableStateOf<Uri?>(null) }
+
     LaunchedEffect(threadId) {
         vm.ensureThreadSelected(threadId)
     }
@@ -134,22 +169,390 @@ fun ChatScreen(
         selectedThread?.otherUserName(me) ?: "Chat"
     }
 
-    // Show errors as toast (plus dialog below)
     LaunchedEffect(errorMessage) {
         if (!errorMessage.isNullOrBlank()) {
             Toast.makeText(context, errorMessage, Toast.LENGTH_SHORT).show()
         }
     }
 
-    // ... keep the rest of your Scaffold / content exactly as you have it ...
-
-    // List state for auto-scroll
     val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
-    // Auto-scroll to latest message whenever the list grows
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+            val latest = messages.last()
+            if (latest.id != lastMessageIdForSound && latest.senderId != currentUid) {
+                try {
+                    if (reactionPlayer.isPlaying) {
+                        reactionPlayer.seekTo(0)
+                    }
+                    reactionPlayer.start()
+                } catch (_: Exception) {
+                }
+            }
+            lastMessageIdForSound = latest.id
+        }
+    }
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            val latest = messages.last()
+            if (latest.id != lastMessageIdForScroll) {
+                listState.animateScrollToItem(messages.lastIndex)
+                lastMessageIdForScroll = latest.id
+            }
+        }
+    }
+
+    LaunchedEffect(highlightedMessageId) {
+        val id = highlightedMessageId
+        if (id != null) {
+            delay(900L)
+            if (highlightedMessageId == id) {
+                highlightedMessageId = null
+            }
+        }
+    }
+
+    fun stopAudioPlayback() {
+        try {
+            audioPlayer?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            audioPlayer?.release()
+        } catch (_: Exception) {
+        }
+        audioPlayer = null
+        currentlyPlayingId = null
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                reactionPlayer.release()
+            } catch (_: Exception) {
+            }
+            try {
+                mediaRecorder?.apply {
+                    stop()
+                    release()
+                }
+            } catch (_: Exception) {
+            }
+            stopAudioPlayback()
+        }
+    }
+
+    // ───────────────────── Permissions ─────────────────────
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingCameraAction?.invoke()
+        } else {
+            val permanentlyDenied = activity != null &&
+                    !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.CAMERA
+                    )
+            if (permanentlyDenied) {
+                showPermissionSettingsFor = PermissionType.CAMERA
+            } else {
+                Toast.makeText(
+                    context,
+                    "Camera permission denied.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    val storagePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val allGranted = permissions.values.all { it }
+        if (allGranted) {
+            pendingStorageAction?.invoke()
+        } else {
+            showPermissionSettingsFor = PermissionType.STORAGE
+        }
+    }
+
+    val audioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingAudioAction?.invoke()
+        } else {
+            val permanentlyDenied = activity != null &&
+                    !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(
+                        activity,
+                        Manifest.permission.RECORD_AUDIO
+                    )
+            if (permanentlyDenied) {
+                showPermissionSettingsFor = PermissionType.AUDIO
+            } else {
+                Toast.makeText(
+                    context,
+                    "Microphone permission denied.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        }
+    }
+
+    fun hasStoragePermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val imgGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_MEDIA_IMAGES
+            ) == PackageManager.PERMISSION_GRANTED
+            val vidGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_MEDIA_VIDEO
+            ) == PackageManager.PERMISSION_GRANTED
+            imgGranted && vidGranted
+        } else {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun requestStorageThen(action: () -> Unit) {
+        pendingStorageAction = action
+        if (hasStoragePermission()) {
+            action()
+        } else {
+            val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                arrayOf(
+                    Manifest.permission.READ_MEDIA_IMAGES,
+                    Manifest.permission.READ_MEDIA_VIDEO
+                )
+            } else {
+                arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+            storagePermissionLauncher.launch(perms)
+        }
+    }
+
+    fun requestCameraThen(action: () -> Unit) {
+        pendingCameraAction = action
+        val status = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        )
+        if (status == PackageManager.PERMISSION_GRANTED) {
+            action()
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    fun requestAudioThen(action: () -> Unit) {
+        pendingAudioAction = action
+        val status = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        )
+        if (status == PackageManager.PERMISSION_GRANTED) {
+            action()
+        } else {
+            audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // ───────────────────── Camera / gallery / files ─────────────────────
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success: Boolean ->
+        if (success) {
+            cameraImageUri?.let { uri ->
+                attachedMedia.add(AttachedMedia(uri, "image"))
+            }
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        uris.forEach { uri ->
+            val mime = context.contentResolver.getType(uri) ?: ""
+            val type = when {
+                mime.startsWith("image/") -> "image"
+                mime.startsWith("video/") -> "video"
+                mime.startsWith("audio/") -> "audio"
+                else -> "file"
+            }
+            attachedMedia.add(AttachedMedia(uri, type))
+        }
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<Uri> ->
+        uris.forEach { uri ->
+            val mime = context.contentResolver.getType(uri) ?: ""
+            val type = when {
+                mime.startsWith("image/") -> "image"
+                mime.startsWith("video/") -> "video"
+                mime.startsWith("audio/") -> "audio"
+                else -> "file"
+            }
+            attachedMedia.add(AttachedMedia(uri, type))
+        }
+    }
+
+    fun openCamera() {
+        try {
+            val file = File(
+                context.cacheDir,
+                "camera_${System.currentTimeMillis()}.jpg"
+            )
+            val uri = FileProvider.getUriForFile(
+                context,
+                "com.girlspace.app.fileprovider",
+                file
+            )
+            cameraImageUri = uri
+            cameraLauncher.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(
+                context,
+                "Unable to open camera",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    fun openGallery() {
+        galleryLauncher.launch("image/*")
+    }
+
+    fun openFilePicker() {
+        filePickerLauncher.launch("*/*")
+    }
+
+    // ───────────────────── Voice notes ─────────────────────
+
+    fun startVoiceRecording() {
+        if (isRecording) return
+
+        try {
+            val file = File(
+                context.cacheDir,
+                "voice_${System.currentTimeMillis()}.m4a"
+            )
+            val recorder = MediaRecorder()
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC)
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+            recorder.setOutputFile(file.absolutePath)
+            recorder.prepare()
+            recorder.start()
+
+            mediaRecorder = recorder
+            audioFilePath = file.absolutePath
+            isRecording = true
+
+            Toast.makeText(
+                context,
+                "Recording… tap again to send",
+                Toast.LENGTH_SHORT
+            ).show()
+        } catch (e: Exception) {
+            isRecording = false
+            mediaRecorder = null
+            audioFilePath = null
+            Toast.makeText(
+                context,
+                "Unable to start recording",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    fun stopRecordingAndSend() {
+        val recorder = mediaRecorder ?: return
+        val path = audioFilePath
+        try {
+            recorder.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            recorder.release()
+        } catch (_: Exception) {
+        }
+        mediaRecorder = null
+        isRecording = false
+
+        if (path != null) {
+            vm.sendVoiceNote(path)
+        }
+    }
+
+    // ───────────────────── Media open / audio play ─────────────────────
+
+    fun openMessageMedia(message: ChatMessage) {
+        val url = message.mediaUrl ?: return
+        val uri = Uri.parse(url)
+
+        // Decide MIME hint based on mediaType
+        val type = when (message.mediaType) {
+            "image" -> "image/*"
+            "video" -> "video/*"
+            "audio" -> "audio/*"
+            else -> "*/*"
+        }
+
+        try {
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                // For remote URLs this is fine too
+                setDataAndType(uri, type)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            // ALWAYS show chooser, so you can pick Gallery / Photos, etc.
+            val chooser = Intent.createChooser(viewIntent, "Open with")
+            context.startActivity(chooser)
+        } catch (e: Exception) {
+            Toast.makeText(
+                context,
+                "No app found to open this file.",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    fun playOrPauseAudio(message: ChatMessage) {
+        val url = message.mediaUrl ?: return
+
+        // If tapping the one already playing → stop
+        if (currentlyPlayingId == message.id) {
+            stopAudioPlayback()
+            return
+        }
+
+        // Start new playback
+        stopAudioPlayback()
+        val mp = MediaPlayer()
+        audioPlayer = mp
+        currentlyPlayingId = message.id
+        try {
+            mp.setDataSource(url)
+            mp.setOnPreparedListener { it.start() }
+            mp.setOnCompletionListener {
+                stopAudioPlayback()
+            }
+            mp.prepareAsync()
+        } catch (e: Exception) {
+            stopAudioPlayback()
+            Toast.makeText(context, "Unable to play audio", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -165,7 +568,6 @@ fun ChatScreen(
                             overflow = TextOverflow.Ellipsis
                         )
 
-                        // Subtitle: Online / Last seen (no "Typing…" here now)
                         val subtitle: String? = when {
                             isOtherOnline -> "Online"
                             !lastSeenText.isNullOrBlank() -> lastSeenText
@@ -199,11 +601,9 @@ fun ChatScreen(
             modifier = Modifier
                 .padding(paddingValues)
                 .fillMaxSize()
-                // Keep content above keyboard while header stays visible
                 .imePadding()
         ) {
             if (selectedThread == null) {
-                // Fallback
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
@@ -226,13 +626,15 @@ fun ChatScreen(
                 ) {
                     items(messages, key = { it.id }) { msg ->
                         val mine = msg.senderId == currentUid
-
                         ChatMessageBubble(
                             message = msg,
                             mine = mine,
                             showReactionBar = !mine && selectedMsgForReaction == msg.id,
+                            highlighted = (msg.id == highlightedMessageId),
+                            isPlayingAudio = (msg.id == currentlyPlayingId),
                             onLongPress = {
                                 if (!mine) {
+                                    // Long-press on OTHER user's message → reactions
                                     try {
                                         if (reactionPlayer.isPlaying) {
                                             reactionPlayer.seekTo(0)
@@ -241,23 +643,30 @@ fun ChatScreen(
                                     } catch (_: Exception) {
                                     }
                                     vm.openReactionPicker(msg.id)
-                                    emojiPickerTargetId = msg.id
+                                } else {
+                                    // Long-press on MY message → delete / unsend dialog
+                                    messageForActions = msg
                                 }
                             },
                             onReactionSelected = { emoji ->
                                 vm.reactToMessage(msg.id, emoji)
                                 vm.closeReactionPicker()
-                                emojiPickerTargetId = null
                             },
                             onMoreReactions = {
-                                emojiPickerTargetId = msg.id
-                                showEmojiPicker = true
-                            }
+                                vm.openReactionPicker(msg.id)
+                            },
+                            currentUid = currentUid,
+                            onReply = {
+                                replyTo = msg
+                            },
+                            onMediaClick = { openMessageMedia(it) },
+                            onAudioClick = { playOrPauseAudio(it) }
                         )
+
                     }
                 }
 
-                // Typing indicator just above composer
+                // Typing indicator
                 AnimatedVisibility(visible = isTyping) {
                     Text(
                         text = "Typing…",
@@ -269,62 +678,217 @@ fun ChatScreen(
                     )
                 }
 
-                // Composer
+                // Attachments preview
+                if (attachedMedia.isNotEmpty()) {
+                    AttachmentPreviewRow(
+                        items = attachedMedia,
+                        onRemove = { item ->
+                            attachedMedia.remove(item)
+                        }
+                    )
+                }
+
+                // Reply preview
+                ReplyPreview(
+                    message = replyTo,
+                    onClear = { replyTo = null },
+                    onJumpToMessage = { target ->
+                        val index = messages.indexOfFirst { it.id == target.id }
+                        if (index >= 0) {
+                            scope.launch {
+                                listState.animateScrollToItem(index)
+                            }
+                            highlightedMessageId = target.id
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "Original message is too old to jump to.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                )
+
+                // Extra actions row (opened via +)
+                AnimatedVisibility(visible = showMoreActions) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        IconButton(onClick = { requestStorageThen { openFilePicker() } }) {
+                            Icon(
+                                imageVector = Icons.Default.AttachFile,
+                                contentDescription = "Attach file"
+                            )
+                        }
+                        IconButton(onClick = { requestCameraThen { openCamera() } }) {
+                            Icon(
+                                imageVector = Icons.Default.PhotoCamera,
+                                contentDescription = "Camera"
+                            )
+                        }
+                        IconButton(onClick = { requestStorageThen { openGallery() } }) {
+                            Icon(
+                                imageVector = Icons.Default.Image,
+                                contentDescription = "Gallery"
+                            )
+                        }
+                        IconButton(onClick = {
+                            if (!isRecording) {
+                                requestAudioThen { startVoiceRecording() }
+                            } else {
+                                stopRecordingAndSend()
+                            }
+                        }) {
+                            Icon(
+                                imageVector = Icons.Default.Mic,
+                                contentDescription = if (isRecording) "Stop recording" else "Voice message",
+                                tint = if (isRecording)
+                                    MaterialTheme.colorScheme.error
+                                else
+                                    MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                    }
+                }
+
+                // Main composer row: + [pill] 🙂 👍/Send
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // + button
+                    IconButton(onClick = { showMoreActions = !showMoreActions }) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = "More"
+                        )
+                    }
+
+                    // Rounded pill text box
                     OutlinedTextField(
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .heightIn(min = 44.dp)           // pill a bit taller
+                            .onFocusChanged { state ->
+                                if (state.isFocused && messages.isNotEmpty()) {
+                                    scope.launch {
+                                        listState.animateScrollToItem(messages.lastIndex)
+                                    }
+                                }
+                            },
                         value = inputText,
                         onValueChange = { vm.setInputText(it) },
-                        placeholder = { Text("Type a message…") },
-                        maxLines = 4
+                        placeholder = {
+                            Text(
+                                "Message",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        },
+                        maxLines = 4,
+                        singleLine = false, // allow wrapping
+                        textStyle = MaterialTheme.typography.bodyMedium.copy(
+                            color = MaterialTheme.colorScheme.onSurface   // 👈 force visible text
+                        ),
+                        shape = RoundedCornerShape(20.dp),               // one shape only
+                        colors = OutlinedTextFieldDefaults.colors()      // default theming
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = { vm.sendMessage() },
-                        enabled = inputText.isNotBlank() && !isSending
+
+                    // Emoji button
+                    IconButton(onClick = { showComposerEmoji = true }) {
+                        Icon(
+                            imageVector = Icons.Default.EmojiEmotions,
+                            contentDescription = "Emojis"
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(2.dp))
+
+                    // Send / Like
+                    val canSend = inputText.isNotBlank() || attachedMedia.isNotEmpty()
+                    IconButton(
+                        onClick = {
+                            if (!canSend) {
+                                vm.setInputText("👍")
+                                vm.sendMessage()
+                                return@IconButton
+                            }
+
+                            var finalText = inputText
+
+                            replyTo?.let { target ->
+                                val sender = target.senderName
+                                    .ifBlank { "GirlSpace user" }
+                                val snippet = when {
+                                    target.text.isNotBlank() -> target.text
+                                    target.mediaType == "image" -> "[Image]"
+                                    target.mediaType == "video" -> "[Video]"
+                                    target.mediaType == "audio" -> "[Voice message]"
+                                    else -> "[Message]"
+                                }.take(80)
+
+                                val prefix = "↩ $sender: $snippet\n\n"
+                                finalText = prefix + finalText
+                            }
+
+                            if (finalText.isNotBlank()) {
+                                vm.setInputText(finalText)
+                                vm.sendMessage()
+                            }
+
+                            if (attachedMedia.isNotEmpty()) {
+                                attachedMedia.forEach { item ->
+                                    vm.sendMedia(context, item.uri)
+                                }
+                                attachedMedia.clear()
+                            }
+
+                            replyTo = null
+                            // 👇 auto-close the + tray after sending
+                            showMoreActions = false
+                        },
+                        colors = IconButtonDefaults.iconButtonColors(
+                            contentColor = if (canSend)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     ) {
-                        if (isSending) {
+                        if (isSending && canSend) {
                             CircularProgressIndicator(
                                 modifier = Modifier.size(16.dp),
                                 strokeWidth = 2.dp
                             )
                         } else {
                             Icon(
-                                imageVector = Icons.Default.Send,
-                                contentDescription = "Send"
+                                imageVector = if (canSend) Icons.Default.Send else Icons.Default.ThumbUp,
+                                contentDescription = if (canSend) "Send" else "Like"
                             )
                         }
                     }
                 }
+
             }
         }
     }
 
-    // Emoji picker dialog (More…)
-    if (showEmojiPicker && emojiPickerTargetId != null) {
-        EmojiPickerDialog(
-            onDismiss = {
-                showEmojiPicker = false
-                emojiPickerTargetId = null
-                vm.closeReactionPicker()
-            },
+    // Emoji picker
+    if (showComposerEmoji) {
+        ComposerEmojiPickerDialog(
+            onDismiss = { showComposerEmoji = false },
             onEmojiSelected = { emoji ->
-                emojiPickerTargetId?.let { msgId ->
-                    vm.reactToMessage(msgId, emoji)
-                }
-                vm.closeReactionPicker()
-                showEmojiPicker = false
-                emojiPickerTargetId = null
+                vm.setInputText(inputText + emoji)
+                showComposerEmoji = false
             }
         )
     }
 
-    // Error dialog
     if (errorMessage != null) {
         AlertDialog(
             onDismissRequest = { vm.clearError() },
@@ -337,10 +901,86 @@ fun ChatScreen(
             text = { Text(errorMessage ?: "") }
         )
     }
+    // Delete / Unsend dialog for my messages
+    if (messageForActions != null) {
+        val target = messageForActions!!
+        AlertDialog(
+            onDismissRequest = { messageForActions = null },
+            title = { Text("Delete message") },
+            text = { Text("Do you want to delete this message only for you, or for everyone?") },
+            confirmButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            vm.deleteMessageForMe(target.id)
+                            messageForActions = null
+                        }
+                    ) { Text("Delete for me") }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    TextButton(
+                        onClick = {
+                            vm.unsendMessage(target.id)
+                            messageForActions = null
+                        }
+                    ) { Text("Delete for everyone") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { messageForActions = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Permission → Settings dialog
+    val permissionFor = showPermissionSettingsFor
+    if (permissionFor != null) {
+        AlertDialog(
+            onDismissRequest = { showPermissionSettingsFor = null },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showPermissionSettingsFor = null
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                        context.startActivity(intent)
+                    }
+                ) {
+                    Text("Open settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionSettingsFor = null }) {
+                    Text("Cancel")
+                }
+            },
+            title = { Text("Permission required") },
+            text = {
+                val msg = when (permissionFor) {
+                    PermissionType.CAMERA ->
+                        "GirlSpace needs camera permission to take photos."
+                    PermissionType.AUDIO ->
+                        "GirlSpace needs microphone permission to record voice messages."
+                    PermissionType.STORAGE ->
+                        "GirlSpace needs storage permission to pick photos, videos, and files."
+                }
+                Text(msg)
+            }
+        )
+    }
 }
 
 /* ─────────────────────────────
-   Message bubble with reactions
+   Message bubble with media + reactions
+   ───────────────────────────── */
+
+/* ─────────────────────────────
+   Message bubble with media + reactions
    ───────────────────────────── */
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -349,15 +989,36 @@ private fun ChatMessageBubble(
     message: ChatMessage,
     mine: Boolean,
     showReactionBar: Boolean,
+    highlighted: Boolean,
+    isPlayingAudio: Boolean,
     onLongPress: () -> Unit,
     onReactionSelected: (String) -> Unit,
-    onMoreReactions: () -> Unit
+    onMoreReactions: () -> Unit,
+    currentUid: String?,
+    onReply: () -> Unit,
+    onMediaClick: (ChatMessage) -> Unit,
+    onAudioClick: (ChatMessage) -> Unit
 ) {
     val senderName = message.senderName.ifBlank { "GirlSpace user" }
     val sdf = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeText = remember(message.createdAt) {
         message.createdAt.let { sdf.format(it.toDate()) }
     }
+
+    val seenByOther = remember(message.readBy, message.senderId, currentUid) {
+        if (!mine || currentUid == null) false
+        else message.readBy.any { it != message.senderId }
+    }
+    val statusTicks = if (mine) {
+        if (seenByOther) "✓✓" else "✓"
+    } else ""
+
+    val baseColor = if (mine) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant
+    }
+    val bgColor = if (highlighted) baseColor.copy(alpha = 0.8f) else baseColor
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -386,12 +1047,9 @@ private fun ChatMessageBubble(
                             bottomEnd = if (mine) 0.dp else 16.dp
                         )
                     )
-                    .background(
-                        if (mine) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.surfaceVariant
-                    )
+                    .background(bgColor)
                     .combinedClickable(
-                        onClick = {},
+                        onClick = onReply,
                         onLongClick = onLongPress
                     )
                     .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -405,12 +1063,110 @@ private fun ChatMessageBubble(
                     )
                 }
 
-                val body = when {
-                    message.text.isNotBlank() -> message.text
-                    message.mediaUrl != null -> "[Media]"
-                    else -> ""
+                // ─── MEDIA ───
+                if (message.mediaUrl != null) {
+                    when (message.mediaType) {
+                        "image" -> {
+                            AsyncImage(
+                                model = message.mediaUrl,
+                                contentDescription = "Image",
+                                modifier = Modifier
+                                    .widthIn(max = 220.dp)
+                                    .height(220.dp)
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .clickable { onMediaClick(message) }
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                        }
+
+                        "video" -> {
+                            Text(
+                                text = "▶ Video",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.clickable { onMediaClick(message) }
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                        }
+
+                        "audio" -> {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.clickable { onAudioClick(message) }
+                            ) {
+                                Text(
+                                    text = if (isPlayingAudio) "⏸" else "▶",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "Voice message",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                        }
+
+                        else -> {
+                            // 📄 Generic document / file (PDF, Word, etc.)
+                            val label = remember(message.mediaUrl) {
+                                val raw = message.mediaUrl?.lowercase() ?: ""
+
+                                when {
+                                    raw.endsWith(".pdf") -> "📄 PDF"
+                                    raw.endsWith(".doc") || raw.endsWith(".docx") ->
+                                        "📝 Word document"
+                                    raw.endsWith(".ppt") || raw.endsWith(".pptx") ->
+                                        "📊 PowerPoint"
+                                    raw.endsWith(".xls") || raw.endsWith(".xlsx") ->
+                                        "📈 Excel sheet"
+                                    else -> "📎 File"
+                                }
+                            }
+
+                            val fileName = message.text.takeIf { it.isNotBlank() }
+
+                            Column(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(
+                                        if (mine)
+                                            Color.White.copy(alpha = 0.15f)
+                                        else
+                                            MaterialTheme.colorScheme.surface
+                                    )
+                                    .clickable { onMediaClick(message) }
+                                    .padding(horizontal = 8.dp, vertical = 6.dp)
+                            ) {
+                                Text(
+                                    text = label,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                                )
+                                fileName?.let {
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = it,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (mine)
+                                            Color.White.copy(alpha = 0.9f)
+                                        else
+                                            MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                        }
+
+                    }
                 }
 
+                // ─── TEXT ───
+                val body = message.text
                 if (body.isNotBlank()) {
                     Text(
                         text = body,
@@ -420,13 +1176,30 @@ private fun ChatMessageBubble(
                 }
 
                 if (timeText.isNotBlank()) {
-                    Text(
-                        text = timeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (mine) Color.White.copy(alpha = 0.8f)
-                        else MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.End)
-                    )
+                    Row(
+                        modifier = Modifier.align(Alignment.End),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = timeText,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (mine) Color.White.copy(alpha = 0.8f)
+                            else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (statusTicks.isNotBlank()) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = statusTicks,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (seenByOther)
+                                    Color(0xFF64B5F6)
+                                else if (mine)
+                                    Color.White.copy(alpha = 0.8f)
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
 
@@ -449,11 +1222,109 @@ private fun ChatMessageBubble(
 }
 
 /* ─────────────────────────────
-   Emoji picker dialog (More…)
+   Reply preview above composer
    ───────────────────────────── */
 
 @Composable
-private fun EmojiPickerDialog(
+private fun ReplyPreview(
+    message: ChatMessage?,
+    onClear: () -> Unit,
+    onJumpToMessage: (ChatMessage) -> Unit
+) {
+    if (message == null) return
+
+    val previewText = remember(message) {
+        when {
+            message.text.isNotBlank() -> message.text
+            message.mediaType == "image" -> "[Image]"
+            message.mediaType == "video" -> "[Video]"
+            message.mediaType == "audio" -> "[Voice message]"
+            else -> "[Message]"
+        }.take(80)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { onJumpToMessage(message) },
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
+        ) {
+            Text(
+                text = message.senderName.ifBlank { "GirlSpace user" },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = previewText,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        TextButton(onClick = onClear) {
+            Text("✕")
+        }
+    }
+}
+
+/* ─────────────────────────────
+   Attachments preview row
+   ───────────────────────────── */
+
+@Composable
+private fun AttachmentPreviewRow(
+    items: List<AttachedMedia>,
+    onRemove: (AttachedMedia) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(items, key = { it.uri.toString() }) { item ->
+            val label = when (item.type) {
+                "image" -> "Photo"
+                "video" -> "Video"
+                "audio" -> "Audio"
+                else -> "File"
+            }
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodySmall
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "✕",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.clickable { onRemove(item) }
+                )
+            }
+        }
+    }
+}
+
+/* ─────────────────────────────
+   Emoji picker dialog (composer)
+   ───────────────────────────── */
+
+@Composable
+private fun ComposerEmojiPickerDialog(
     onDismiss: () -> Unit,
     onEmojiSelected: (String) -> Unit
 ) {
@@ -469,11 +1340,11 @@ private fun EmojiPickerDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {},
-        title = { Text("More reactions") },
+        title = { Text("Pick emoji") },
         text = {
             Column {
                 Text(
-                    text = "Tap an emoji to react",
+                    text = "Tap an emoji to insert into your message",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(12.dp))
