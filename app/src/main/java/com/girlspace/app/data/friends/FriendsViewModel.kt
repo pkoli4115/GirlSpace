@@ -42,6 +42,9 @@ data class FriendsUiState(
     // 🔹 mutual friend count per suggested user
     val mutualFriendsCounts: Map<String, Int> = emptyMap(),
 
+    // 🔹 following relationship (separate from "friends")
+    val followingIds: Set<String> = emptySet(),
+
     // Search
     val searchQuery: String = "",
     val searchResults: List<SearchResultUser> = emptyList(),
@@ -65,6 +68,7 @@ class FriendsViewModel @Inject constructor(
         observeIncoming()
         observeOutgoing()
         loadSuggestions()
+        loadFollowing()
     }
 
     // region Observers
@@ -91,6 +95,64 @@ class FriendsViewModel @Inject constructor(
         viewModelScope.launch {
             friendRepository.observeOutgoingRequests().collect { ids ->
                 _uiState.update { it.copy(outgoingRequestIds = ids) }
+            }
+        }
+    }
+
+    // endregion
+
+    // region Following (for Follow / Unfollow menu)
+
+    private fun loadFollowing() {
+        viewModelScope.launch {
+            val currentUser = auth.currentUser ?: return@launch
+            try {
+                val snap = db.collection("users")
+                    .document(currentUser.uid)
+                    .get()
+                    .await()
+
+                val followingArray = snap.get("following") as? List<*>
+                val followingIds = followingArray
+                    ?.filterIsInstance<String>()
+                    ?.toSet()
+                    ?: emptySet()
+
+                _uiState.update { it.copy(followingIds = followingIds) }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(error = it.error ?: e.message ?: "Failed to load following state")
+                }
+            }
+        }
+    }
+
+    fun followUser(targetUid: String) {
+        viewModelScope.launch {
+            try {
+                friendRepository.followUser(targetUid)
+                _uiState.update {
+                    it.copy(followingIds = it.followingIds + targetUid)
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(error = e.message ?: "Failed to follow user")
+                }
+            }
+        }
+    }
+
+    fun unfollowUser(targetUid: String) {
+        viewModelScope.launch {
+            try {
+                friendRepository.unfollowUser(targetUid)
+                _uiState.update {
+                    it.copy(followingIds = it.followingIds - targetUid)
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(error = e.message ?: "Failed to unfollow user")
+                }
             }
         }
     }
@@ -267,6 +329,8 @@ class FriendsViewModel @Inject constructor(
                 // Remove from friends + suggestions instantly
                 hideSuggestion(targetUid)
                 loadSuggestions()
+                // Also refresh following state (block may remove follow)
+                loadFollowing()
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message ?: "Failed to block user") }
             }

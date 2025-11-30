@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.girlspace.app">
+
     <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
-       <application
+    <!-- For push / local notifications (Android 13+ will still need runtime prompt) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
         android:name=".GirlSpaceApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -11,18 +15,22 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.GirlSpace">
+
         <!-- ✅ Facebook config -->
         <meta-data
             android:name="com.facebook.sdk.ApplicationId"
             android:value="@string/facebook_app_id" />
 
-        <!-- Optional but recommended for some features -->
+        <!-- Optional but recommended for some Facebook features -->
         <meta-data
             android:name="com.facebook.sdk.ClientToken"
             android:value="@string/facebook_client_token" />
+
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize">
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

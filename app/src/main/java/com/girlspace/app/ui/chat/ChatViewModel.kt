@@ -11,6 +11,7 @@ import com.girlspace.app.data.chat.ChatThread
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
+import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,9 +33,14 @@ class ChatViewModel : ViewModel() {
 
     private var threadsListener: ListenerRegistration? = null
     private var msgListener: ListenerRegistration? = null
+    private var typingListener: ListenerRegistration? = null
+    private var presenceListener: ListenerRegistration? = null
 
     private val _threads = MutableStateFlow<List<ChatThread>>(emptyList())
     val threads: StateFlow<List<ChatThread>> = _threads
+
+    private val _filteredThreads = MutableStateFlow<List<ChatThread>>(emptyList())
+    val filteredThreads: StateFlow<List<ChatThread>> = _filteredThreads
 
     private val _selectedThread = MutableStateFlow<ChatThread?>(null)
     val selectedThread: StateFlow<ChatThread?> = _selectedThread
@@ -48,7 +54,6 @@ class ChatViewModel : ViewModel() {
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping
 
-    // prevent double-send taps
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending
 
@@ -58,22 +63,54 @@ class ChatViewModel : ViewModel() {
     private val _errorMessage = MutableStateFlow<String?>(null)
     val errorMessage: StateFlow<String?> = _errorMessage
 
-    // currently selected messageId for inline reaction bar
     private val _selectedMessageForReaction = MutableStateFlow<String?>(null)
     val selectedMessageForReaction: StateFlow<String?> = _selectedMessageForReaction
 
-    // 🔹 Current plan: "free" / "basic" / "premium"
     private val _currentPlan = MutableStateFlow("free")
     val currentPlan: StateFlow<String> = _currentPlan
+
+    private val _otherUserName = MutableStateFlow<String?>(null)
+    val otherUserName: StateFlow<String?> = _otherUserName
+
+    private val _isOtherOnline = MutableStateFlow(false)
+    val isOtherOnline: StateFlow<Boolean> = _isOtherOnline
+
+    // pretty text like "20 min ago", "3 hours ago"
+    private val _lastSeenText = MutableStateFlow<String?>(null)
+    val lastSeenText: StateFlow<String?> = _lastSeenText
+
+    private var lastTypingSent: Boolean = false
+
+    // Friends + Suggestions
+    private val _friends = MutableStateFlow<List<ChatUserSummary>>(emptyList())
+    val friends: StateFlow<List<ChatUserSummary>> = _friends
+
+    private val _suggestions = MutableStateFlow<List<ChatUserSummary>>(emptyList())
+    val suggestions: StateFlow<List<ChatUserSummary>> = _suggestions
+
+    private val _searchQuery = MutableStateFlow("")
+    val searchQuery: StateFlow<String> = _searchQuery
+
+    private val _contactSearchQuery = MutableStateFlow("")
+    val contactSearchQuery: StateFlow<String> = _contactSearchQuery
+
+    private val _contactSearchResults =
+        MutableStateFlow<List<ChatUserSummary>>(emptyList())
+    val contactSearchResults: StateFlow<List<ChatUserSummary>> = _contactSearchResults
 
     init {
         listenThreads()
         loadUserPlan()
+        loadFriendsAndSuggestions()
+
+        viewModelScope.launch {
+            markUserActive()
+        }
     }
 
-    /* -------------------------------------------------------------------
-       LOAD USER PLAN FROM FIRESTORE
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // PLAN
+    // -------------------------------------------------------------
     private fun loadUserPlan() {
         val uid = auth.currentUser?.uid ?: return
 
@@ -87,8 +124,6 @@ class ChatViewModel : ViewModel() {
 
                 val planRaw = snap.getString("plan")
                 val isPremiumFlag = snap.getBoolean("isPremium") ?: false
-
-                // If older docs only have isPremium, map that → "premium"
                 val resolved = (planRaw ?: if (isPremiumFlag) "premium" else "free")
                     .lowercase()
 
@@ -96,32 +131,261 @@ class ChatViewModel : ViewModel() {
                 Log.d("ChatViewModel", "Loaded user plan: $resolved")
             } catch (e: Exception) {
                 Log.e("ChatViewModel", "loadUserPlan failed", e)
-                // Fallback stays "free"
             }
         }
     }
 
-    /* -------------------------------------------------------------------
-       THREAD LISTENER
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // FRIENDS + SUGGESTIONS (with presence)
+    // -------------------------------------------------------------
+    private fun loadFriendsAndSuggestions() {
+        val uid = auth.currentUser?.uid ?: return
+
+        viewModelScope.launch {
+            try {
+                val meDoc = firestore.collection("users")
+                    .document(uid)
+                    .get()
+                    .await()
+
+                val followingArray = meDoc.get("following") as? List<*>
+                val followingIds = followingArray
+                    ?.filterIsInstance<String>()
+                    ?.toSet()
+                    ?: emptySet()
+
+                // Friends row
+                val friendSummaries = mutableListOf<ChatUserSummary>()
+                for (fid in followingIds) {
+                    val userDoc = firestore.collection("users")
+                        .document(fid)
+                        .get()
+                        .await()
+
+                    if (!userDoc.exists()) continue
+
+                    val displayName =
+                        userDoc.getString("displayName")
+                            ?: userDoc.getString("name")
+                            ?: userDoc.getString("fullName")
+                            ?: userDoc.getString("username")
+                            ?: "GirlSpace user"
+
+                    val avatar = userDoc.getString("photoUrl")
+                        ?: userDoc.getString("avatarUrl")
+
+                    // presence for this friend
+                    val statusDoc = firestore.collection("user_status")
+                        .document(fid)
+                        .get()
+                        .await()
+
+                    val lastActive = statusDoc.getLong("lastActiveAt") ?: 0L
+                    val now = System.currentTimeMillis()
+                    val onlineThreshold = 90_000L
+                    val isOnline = lastActive > 0L && (now - lastActive) <= onlineThreshold
+
+                    friendSummaries.add(
+                        ChatUserSummary(
+                            uid = fid,
+                            displayName = displayName,
+                            avatarUrl = avatar,
+                            mutualCount = 0,
+                            isOnline = isOnline,
+                            lastActiveAt = lastActive
+                        )
+                    )
+                }
+                _friends.value = friendSummaries
+
+                // Suggestions: friends-of-friends
+                val suggestionIds = mutableMapOf<String, Int>()
+
+                for (fid in followingIds) {
+                    val friendDoc = firestore.collection("users")
+                        .document(fid)
+                        .get()
+                        .await()
+
+                    val friendFollowingArray = friendDoc.get("following") as? List<*>
+                    val friendFollowingIds = friendFollowingArray
+                        ?.filterIsInstance<String>()
+                        ?: emptyList()
+
+                    friendFollowingIds.forEach { otherId ->
+                        if (otherId == uid) return@forEach
+                        if (followingIds.contains(otherId)) return@forEach
+                        val current = suggestionIds[otherId] ?: 0
+                        suggestionIds[otherId] = current + 1
+                    }
+                }
+
+                val suggestionsList = mutableListOf<ChatUserSummary>()
+                suggestionIds.entries
+                    .sortedByDescending { it.value }
+                    .take(20)
+                    .forEach { (otherId, mutualCount) ->
+                        val userDoc = firestore.collection("users")
+                            .document(otherId)
+                            .get()
+                            .await()
+
+                        if (!userDoc.exists()) return@forEach
+
+                        val displayName =
+                            userDoc.getString("displayName")
+                                ?: userDoc.getString("name")
+                                ?: userDoc.getString("fullName")
+                                ?: userDoc.getString("username")
+                                ?: "GirlSpace user"
+
+                        val avatar = userDoc.getString("photoUrl")
+                            ?: userDoc.getString("avatarUrl")
+
+                        val statusDoc = firestore.collection("user_status")
+                            .document(otherId)
+                            .get()
+                            .await()
+
+                        val lastActive = statusDoc.getLong("lastActiveAt") ?: 0L
+                        val now = System.currentTimeMillis()
+                        val onlineThreshold = 90_000L
+                        val isOnline = lastActive > 0L && (now - lastActive) <= onlineThreshold
+
+                        suggestionsList.add(
+                            ChatUserSummary(
+                                uid = otherId,
+                                displayName = displayName,
+                                avatarUrl = avatar,
+                                mutualCount = mutualCount,
+                                isOnline = isOnline,
+                                lastActiveAt = lastActive
+                            )
+                        )
+                    }
+
+                _suggestions.value = suggestionsList
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "loadFriendsAndSuggestions failed", e)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // THREADS + FILTER
+    // -------------------------------------------------------------
     private fun listenThreads() {
         threadsListener = repo.observeThreads { list ->
             _threads.value = list
+            applyThreadFilter()
             if (_selectedThread.value == null && list.isNotEmpty()) {
                 selectThread(list.first())
             }
         }
     }
 
-    /* -------------------------------------------------------------------
-       START CHAT BY EMAIL
-    ------------------------------------------------------------------- */
+    private fun applyThreadFilter() {
+        val q = _searchQuery.value.trim().lowercase()
+        val myId = auth.currentUser?.uid
+        val base = _threads.value
+
+        if (q.isBlank() || myId == null) {
+            _filteredThreads.value = base
+            return
+        }
+
+        _filteredThreads.value = base.filter { thread ->
+            val otherName = thread.otherUserName(myId)
+            otherName.lowercase().contains(q) ||
+                    thread.lastMessage.lowercase().contains(q)
+        }
+    }
+
+    fun updateSearchQuery(newQuery: String) {
+        _searchQuery.value = newQuery
+        applyThreadFilter()
+    }
+
+    // -------------------------------------------------------------
+    // CONTACT SEARCH
+    // -------------------------------------------------------------
+    fun onContactSearchQueryChange(newValue: String) {
+        _contactSearchQuery.value = newValue
+
+        val trimmed = newValue.trim()
+        if (trimmed.length < 3) {
+            _contactSearchResults.value = emptyList()
+            return
+        }
+
+        viewModelScope.launch {
+            performContactSearch(trimmed)
+        }
+    }
+
+    private suspend fun performContactSearch(query: String) {
+        val currentUser = auth.currentUser ?: return
+
+        try {
+            val lower = query.lowercase()
+
+            val snap = firestore.collection("users")
+                .limit(200)
+                .get()
+                .await()
+
+            val results = snap.documents.mapNotNull { doc ->
+                val uid = doc.id
+                if (uid == currentUser.uid) return@mapNotNull null
+
+                val name = doc.getString("name")
+                    ?: doc.getString("fullName")
+                    ?: doc.getString("displayName")
+                    ?: ""
+                val email = doc.getString("email") ?: ""
+                val phone = doc.getString("phone") ?: ""
+
+                val matches = name.contains(lower, ignoreCase = true) ||
+                        email.contains(lower, ignoreCase = true) ||
+                        phone.contains(lower, ignoreCase = true)
+
+                if (!matches) return@mapNotNull null
+
+                val displayName = when {
+                    name.isNotBlank() -> name
+                    email.isNotBlank() -> email
+                    phone.isNotBlank() -> phone
+                    else -> "GirlSpace user"
+                }
+
+                val avatar = doc.getString("photoUrl")
+                    ?: doc.getString("avatarUrl")
+
+                ChatUserSummary(
+                    uid = uid,
+                    displayName = displayName,
+                    avatarUrl = avatar,
+                    mutualCount = 0
+                )
+            }
+
+            _contactSearchResults.value = results
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "performContactSearch failed", e)
+            _errorMessage.value = e.message ?: "Search failed"
+        }
+    }
+
+    // -------------------------------------------------------------
+    // START CHAT
+    // -------------------------------------------------------------
     fun startChatWithEmail(email: String) {
         viewModelScope.launch {
             try {
                 _isStartingChat.value = true
                 val thread = repo.startOrGetThreadByEmail(email)
                 selectThread(thread)
+                markUserActive()
             } catch (e: Exception) {
                 _errorMessage.value = e.message
             } finally {
@@ -130,9 +394,110 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /* -------------------------------------------------------------------
-       SELECT THREAD + LISTEN MESSAGES
-    ------------------------------------------------------------------- */
+    fun startChatWithUser(otherUid: String) {
+        val myUid = auth.currentUser?.uid ?: return
+        if (otherUid == myUid) return
+
+        viewModelScope.launch {
+            try {
+                _isStartingChat.value = true
+
+                val threadsRef = firestore.collection("threads")
+
+                val existingAB = threadsRef
+                    .whereEqualTo("userA", myUid)
+                    .whereEqualTo("userB", otherUid)
+                    .get()
+                    .await()
+
+                val existingBA = threadsRef
+                    .whereEqualTo("userA", otherUid)
+                    .whereEqualTo("userB", myUid)
+                    .get()
+                    .await()
+
+                val existingDoc = (existingAB.documents + existingBA.documents)
+                    .firstOrNull()
+
+                val thread: ChatThread = if (existingDoc != null) {
+                    val t = existingDoc.toObject(ChatThread::class.java)
+                    (t ?: ChatThread()).copy(id = existingDoc.id)
+                } else {
+                    val meDoc = firestore.collection("users")
+                        .document(myUid)
+                        .get()
+                        .await()
+                    val otherDoc = firestore.collection("users")
+                        .document(otherUid)
+                        .get()
+                        .await()
+
+                    val myName =
+                        meDoc.getString("displayName")
+                            ?: meDoc.getString("name")
+                            ?: "You"
+
+                    val otherName =
+                        otherDoc.getString("displayName")
+                            ?: otherDoc.getString("name")
+                            ?: "GirlSpace user"
+
+                    val newDoc = threadsRef.document()
+                    val newThread = ChatThread(
+                        id = newDoc.id,
+                        userA = myUid,
+                        userB = otherUid,
+                        userAName = myName,
+                        userBName = otherName,
+                        lastMessage = "",
+                        lastTimestamp = System.currentTimeMillis(),
+                        unreadCount = 0
+                    )
+
+                    newDoc.set(newThread).await()
+                    newThread
+                }
+
+                selectThread(thread)
+                markUserActive()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "startChatWithUser failed", e)
+                _errorMessage.value = e.message
+            } finally {
+                _isStartingChat.value = false
+            }
+        }
+    }
+
+    // Ensure correct thread selected when entering via route "chat/{threadId}"
+    fun ensureThreadSelected(threadId: String) {
+        val current = _selectedThread.value
+        if (current?.id == threadId) return
+
+        val fromList = _threads.value.firstOrNull { it.id == threadId }
+        if (fromList != null) {
+            selectThread(fromList)
+        } else {
+            viewModelScope.launch {
+                try {
+                    val snap = firestore.collection("threads")
+                        .document(threadId)
+                        .get()
+                        .await()
+                    if (snap.exists()) {
+                        val t = snap.toObject(ChatThread::class.java)
+                        t?.let { selectThread(it.copy(id = threadId)) }
+                    }
+                } catch (e: Exception) {
+                    Log.e("ChatViewModel", "ensureThreadSelected failed", e)
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // SELECT THREAD + LISTEN
+    // -------------------------------------------------------------
     fun selectThread(thread: ChatThread) {
         _selectedThread.value = thread
 
@@ -140,25 +505,179 @@ class ChatViewModel : ViewModel() {
         msgListener = repo.observeMessages(thread.id) { msgs ->
             _messages.value = msgs
         }
+
+        _isTyping.value = false
+        lastTypingSent = false
+
+        val myUid = auth.currentUser?.uid
+        val otherUid = when (myUid) {
+            null -> null
+            thread.userA -> thread.userB
+            thread.userB -> thread.userA
+            else -> null
+        }
+
+        val otherName = when (myUid) {
+            thread.userA -> thread.userBName
+            thread.userB -> thread.userAName
+            else -> thread.userAName
+        }
+        _otherUserName.value = otherName
+
+        // typing listener
+        typingListener?.remove()
+        if (otherUid != null) {
+            typingListener = firestore.collection("typing_status")
+                .document(thread.id)
+                .collection("users")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        Log.e("ChatViewModel", "observeTypingUsers error", error)
+                        _isTyping.value = false
+                        return@addSnapshotListener
+                    }
+
+                    val now = System.currentTimeMillis()
+                    val cutoff = now - 8_000L
+
+                    val otherTyping = snapshot?.documents
+                        ?.firstOrNull { it.id == otherUid }
+                        ?.let { doc ->
+                            val ts = doc.getLong("updatedAt") ?: 0L
+                            val flag = doc.getBoolean("isTyping") ?: false
+                            flag && ts >= cutoff
+                        } ?: false
+
+                    _isTyping.value = otherTyping
+                }
+        } else {
+            typingListener = null
+        }
+
+        // presence listener
+        presenceListener?.remove()
+        if (otherUid != null) {
+            presenceListener = firestore.collection("user_status")
+                .document(otherUid)
+                .addSnapshotListener { snap, error ->
+                    if (error != null) {
+                        Log.e("ChatViewModel", "observeUserPresence error", error)
+                        _isOtherOnline.value = false
+                        _lastSeenText.value = null
+                        return@addSnapshotListener
+                    }
+
+                    val lastActive = snap?.getLong("lastActiveAt") ?: 0L
+                    if (lastActive == 0L) {
+                        _isOtherOnline.value = false
+                        _lastSeenText.value = null
+                        return@addSnapshotListener
+                    }
+
+                    val now = System.currentTimeMillis()
+                    val onlineThreshold = 90_000L
+
+                    val online = now - lastActive <= onlineThreshold
+                    _isOtherOnline.value = online
+
+                    if (!online) {
+                        val diffMinutes =
+                            ((now - lastActive) / 60_000L).coerceAtLeast(1L)
+
+                        val pretty = when {
+                            diffMinutes < 60L -> "${diffMinutes} min ago"
+                            diffMinutes < 60L * 24L -> {
+                                val hours = diffMinutes / 60L
+                                "$hours hour" + if (hours == 1L) "" else "s ago"
+                            }
+                            else -> {
+                                val days = diffMinutes / (60L * 24L)
+                                "$days day" + if (days == 1L) "" else "s ago"
+                            }
+                        }
+
+                        _lastSeenText.value = pretty
+                    } else {
+                        _lastSeenText.value = null
+                    }
+                }
+        } else {
+            presenceListener = null
+        }
+
+        viewModelScope.launch {
+            markUserActive()
+        }
     }
 
-    /* -------------------------------------------------------------------
-       TEXT INPUT
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // TYPING STATE
+    // -------------------------------------------------------------
     fun setInputText(text: String) {
         _inputText.value = text
-        _isTyping.value = text.isNotBlank()
+        updateTypingState()
     }
 
-    /* -------------------------------------------------------------------
-       SEND MESSAGE (TEXT)
-    ------------------------------------------------------------------- */
+    private fun updateTypingState() {
+        val thread = _selectedThread.value ?: return
+        val uid = auth.currentUser?.uid ?: return
+
+        val typingNow = _inputText.value.isNotBlank()
+        if (typingNow == lastTypingSent) return
+        lastTypingSent = typingNow
+
+        viewModelScope.launch {
+            try {
+                val docRef = firestore.collection("typing_status")
+                    .document(thread.id)
+                    .collection("users")
+                    .document(uid)
+
+                if (typingNow) {
+                    val now = System.currentTimeMillis()
+                    docRef.set(
+                        mapOf(
+                            "isTyping" to true,
+                            "updatedAt" to now
+                        )
+                    ).await()
+                } else {
+                    docRef.delete().await()
+                }
+
+                markUserActive()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "updateTypingState failed", e)
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+    // PRESENCE
+    // -------------------------------------------------------------
+    private suspend fun markUserActive() {
+        val uid = auth.currentUser?.uid ?: return
+        try {
+            val now = System.currentTimeMillis()
+            firestore.collection("user_status")
+                .document(uid)
+                .set(
+                    mapOf("lastActiveAt" to now),
+                    SetOptions.merge()
+                )
+                .await()
+        } catch (e: Exception) {
+            Log.e("ChatViewModel", "markUserActive failed", e)
+        }
+    }
+
+    // -------------------------------------------------------------
+    // SEND MESSAGE
+    // -------------------------------------------------------------
     fun sendMessage() {
         val thread = _selectedThread.value ?: return
         val text = _inputText.value.trim()
         if (text.isEmpty()) return
-
-        // Ignore extra taps while sending
         if (_isSending.value) return
 
         viewModelScope.launch {
@@ -171,7 +690,8 @@ class ChatViewModel : ViewModel() {
                 )
 
                 _inputText.value = ""
-                _isTyping.value = false
+                updateTypingState()
+                markUserActive()
             } catch (e: Exception) {
                 _errorMessage.value = e.message
                 Log.e("Chat", "sendMessage failed", e)
@@ -181,9 +701,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /* -------------------------------------------------------------------
-       MEDIA SEND (PLAN-AWARE)
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // MEDIA SEND
+    // -------------------------------------------------------------
     fun sendMedia(context: Context, uri: Uri) {
         val thread = _selectedThread.value ?: return
 
@@ -198,14 +718,11 @@ class ChatViewModel : ViewModel() {
                 val isVideo = uri.toString().contains(".mp4", ignoreCase = true)
                         || uri.toString().contains("video", ignoreCase = true)
 
-                // 🔹 Use the actual plan from Firestore
                 val plan = _currentPlan.value
-
-                // Simple per-plan size limit (you can later read this from PlanLimits)
                 val maxSize = when (plan) {
-                    "premium" -> 5f  // 5 MB
-                    "basic" -> 2f    // 2 MB
-                    else -> 2f       // free
+                    "premium" -> 5f
+                    "basic" -> 2f
+                    else -> 2f
                 }
 
                 if (sizeMb > maxSize) {
@@ -219,7 +736,6 @@ class ChatViewModel : ViewModel() {
                     return@launch
                 }
 
-                // Upload to Storage
                 val extension = if (isVideo) "mp4" else "jpg"
                 val ref = storage.reference.child(
                     "chat_media/${System.currentTimeMillis()}.$extension"
@@ -234,6 +750,7 @@ class ChatViewModel : ViewModel() {
                     mediaType = if (isVideo) "video" else "image"
                 )
 
+                markUserActive()
             } catch (e: Exception) {
                 _errorMessage.value = e.message ?: "Failed to send media"
                 Log.e("Chat", "Media send failed", e)
@@ -241,9 +758,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /* -------------------------------------------------------------------
-       REACTIONS
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // REACTIONS
+    // -------------------------------------------------------------
     fun openReactionPicker(messageId: String) {
         _selectedMessageForReaction.value = messageId
     }
@@ -268,9 +785,9 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    /* -------------------------------------------------------------------
-       ERROR
-    ------------------------------------------------------------------- */
+    // -------------------------------------------------------------
+    // ERROR
+    // -------------------------------------------------------------
     fun clearError() {
         _errorMessage.value = null
     }
@@ -279,5 +796,7 @@ class ChatViewModel : ViewModel() {
         super.onCleared()
         threadsListener?.remove()
         msgListener?.remove()
+        typingListener?.remove()
+        presenceListener?.remove()
     }
 }

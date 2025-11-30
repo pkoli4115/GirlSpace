@@ -1,11 +1,22 @@
 package com.girlspace.app.ui.groups
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.widthIn
 import android.media.MediaPlayer
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -101,15 +112,61 @@ fun GroupChatScreen(
         }
     }
 
+    // ─────────────────────────────────────────────
+    // Simple "online" heuristic for the group
+    // (any message in the last 2 min = active)
+    // ─────────────────────────────────────────────
+    val groupActiveNow = remember(messages) {
+        val now = System.currentTimeMillis()
+        val threshold = 2 * 60 * 1000L // 2 minutes
+        messages.any { msg ->
+            val ts = msg.createdAt.toDate().time
+            now - ts <= threshold
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = groupName,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = groupName,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                            if (groupActiveNow) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(8.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(0xFF4CAF50)) // green dot
+                                )
+                            }
+                        }
+                        when {
+                            isTyping -> {
+                                Text(
+                                    text = "Someone is typing…",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            groupActiveNow -> {
+                                Text(
+                                    text = "Active now",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
                 },
                 navigationIcon = {
                     if (onBack != null) {
@@ -168,16 +225,6 @@ fun GroupChatScreen(
                         }
                     )
                 }
-            }
-
-            if (isTyping) {
-                Text(
-                    text = "Someone is typing…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier
-                        .padding(start = 16.dp, bottom = 4.dp)
-                )
             }
 
             Row(
@@ -256,9 +303,9 @@ private fun GroupMessageBubble(
     onReactionSelected: (String) -> Unit,
     onMoreReactions: () -> Unit
 ) {
-    val timeText = message.createdAt?.toDate()?.let {
+    val timeText = message.createdAt.toDate().let {
         java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(it)
-    } ?: ""
+    }
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -341,15 +388,13 @@ private fun GroupMessageBubble(
                     )
                 }
 
-                if (timeText.isNotBlank()) {
-                    Text(
-                        text = timeText,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (mine) Color.White.copy(alpha = 0.8f)
-                        else MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
-                        modifier = Modifier.align(Alignment.End)
-                    )
-                }
+                Text(
+                    text = timeText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (mine) Color.White.copy(alpha = 0.8f)
+                    else MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f),
+                    modifier = Modifier.align(Alignment.End)
+                )
             }
 
             // Reactions line
@@ -371,7 +416,7 @@ private fun GroupMessageBubble(
     }
 }
 
-// Re-use the same ReactionBar & EmojiPickerDialog as ChatsScreen
+// Re-use reaction bar & emoji picker
 
 @Composable
 private fun ReactionBar(
@@ -418,7 +463,6 @@ private fun EmojiPickerDialog(
     onDismiss: () -> Unit,
     onEmojiSelected: (String) -> Unit
 ) {
-    // Same list as ChatsScreen
     val allEmojis = listOf(
         "😀","😁","😂","🤣","😃","😄","😅","😆",
         "😉","😊","🥰","😍","🤩","😘","😗","😙",

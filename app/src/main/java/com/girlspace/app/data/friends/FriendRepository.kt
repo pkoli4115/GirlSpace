@@ -1,12 +1,14 @@
 package com.girlspace.app.data.friends
-import kotlinx.coroutines.launch
+
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 
 /**
@@ -20,7 +22,6 @@ data class FriendUserSummary(
     val email: String? = null,
     val phone: String? = null
 )
-
 
 /**
  * Represent a pending friend request shown in Requests tab.
@@ -176,6 +177,7 @@ class FriendRepository(
     /**
      * Block [targetUid].
      * Removes any friendship and pending requests both sides, then writes blocked_users entry.
+     * Also removes from my "following" array, if present.
      */
     suspend fun blockUser(targetUid: String) {
         val uid = currentUid()
@@ -191,6 +193,8 @@ class FriendRepository(
         val incomingThemFromMe = incomingRequestsCollection(targetUid).document(uid)
         val outgoingThemToMe = outgoingRequestsCollection(targetUid).document(uid)
 
+        val meDocRef = usersCollection().document(uid)
+
         val batch = db.batch()
         batch.set(blockRef, mapOf("blockedUid" to targetUid, "createdAt" to now))
         batch.delete(myFriendRef)
@@ -199,6 +203,8 @@ class FriendRepository(
         batch.delete(outgoingMeToThem)
         batch.delete(incomingThemFromMe)
         batch.delete(outgoingThemToMe)
+        // Remove from my following list as well
+        batch.update(meDocRef, "following", FieldValue.arrayRemove(targetUid))
 
         batch.commit().await()
     }
@@ -210,6 +216,32 @@ class FriendRepository(
         val uid = currentUid()
         val blockRef = blockedUsersCollection(uid).document(targetUid)
         blockRef.delete().await()
+    }
+
+    /**
+     * Follow another user by adding them to my "following" array.
+     */
+    suspend fun followUser(targetUid: String) {
+        val uid = currentUid()
+        if (uid == targetUid) return
+
+        usersCollection()
+            .document(uid)
+            .update("following", FieldValue.arrayUnion(targetUid))
+            .await()
+    }
+
+    /**
+     * Unfollow another user by removing them from my "following" array.
+     */
+    suspend fun unfollowUser(targetUid: String) {
+        val uid = currentUid()
+        if (uid == targetUid) return
+
+        usersCollection()
+            .document(uid)
+            .update("following", FieldValue.arrayRemove(targetUid))
+            .await()
     }
 
     // endregion

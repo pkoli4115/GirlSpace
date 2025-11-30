@@ -37,7 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import com.girlspace.app.core.plan.PlanLimitsRepository
-import com.girlspace.app.ui.chat.ChatsScreen
+import com.girlspace.app.ui.chat.ChatsScreen   // ✅ use ChatsScreen here
 import com.girlspace.app.ui.feed.FeedScreen
 import com.girlspace.app.ui.groups.GroupsScreen
 import com.girlspace.app.ui.friends.FriendsScreen   // ✅ NEW IMPORT
@@ -177,9 +177,14 @@ fun HomeRoot(
 
                 HomeTab.Reels -> ReelsTab()
 
-                HomeTab.Chats -> ChatsScreen()
+                HomeTab.Chats -> ChatsScreen(
+                    onOpenThread = { thread ->
+                        // ChatScreen uses threadId argument
+                        navController.navigate("chat/${thread.id}")
+                    }
+                )
 
-                // ✅ Only this line changed: use the new FriendsScreen
+                // ✅ Use the new FriendsScreen
                 HomeTab.Friends -> FriendsScreen()
 
                 HomeTab.Communities -> GroupsScreen(
@@ -211,7 +216,7 @@ private fun ReelsTab() {
     }
 }
 
-// ---- Friends Tab ----
+// ---- Friends Tab (legacy stub) ----
 // (kept as-is but no longer used; safe to keep for now)
 
 private enum class FriendsSubTab {
