@@ -1,3 +1,6 @@
+// GirlSpace – ChatScreen.kt
+// Version: v1.3.2 – WhatsApp-style inline reply (jump + highlight), fixed scroll/keyboard & pagination, delete-for-me/everyone wiring
+
 package com.girlspace.app.ui.chat
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.heightIn
@@ -140,15 +143,15 @@ fun ChatScreen(
     var audioPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
     var currentlyPlayingId by remember { mutableStateOf<String?>(null) }
 
-    var lastMessageIdForSound by remember { mutableStateOf<String?>(null) }
+    // For bottom auto-scroll logic
     var lastMessageIdForScroll by remember { mutableStateOf<String?>(null) }
 
+    // Reply / actions
     var replyTo by remember { mutableStateOf<ChatMessage?>(null) }
-    // Long-press actions on *my* messages
     var messageForActions by remember { mutableStateOf<ChatMessage?>(null) }
 
     var showComposerEmoji by remember { mutableStateOf(false) }
-    var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }   // NEW
+    var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }
 
     var showMoreActions by remember { mutableStateOf(false) }
 
@@ -181,34 +184,39 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Auto-scroll ONLY if user is at bottom
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
+    // ─────────────────────────────
+    // Auto-scroll & keyboard behavior (WhatsApp-style)
+    // ─────────────────────────────
+    LaunchedEffect(messages) {
+        if (messages.isEmpty()) return@LaunchedEffect
 
-            val isAtBottom =
-                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ==
-                        listState.layoutInfo.totalItemsCount - 1
+        val newBottomId = messages.last().id
 
-            if (isAtBottom) {
-                scope.launch {
-                    listState.animateScrollToItem(messages.lastIndex)
-                }
-            }
-
-            lastMessageIdForScroll = messages.last().id
+        // First time: jump to bottom without animation
+        if (lastMessageIdForScroll == null) {
+            listState.scrollToItem(messages.lastIndex)
+            lastMessageIdForScroll = newBottomId
+            return@LaunchedEffect
         }
+
+        val isNewBottom = newBottomId != lastMessageIdForScroll
+        val lastVisibleIndex = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+        val totalItems = listState.layoutInfo.totalItemsCount
+
+        // "Near bottom" threshold (within last 2 items)
+        val isAtBottom = totalItems == 0 || lastVisibleIndex >= totalItems - 2
+
+        // Only auto-scroll if:
+        // 1) a NEW message arrived at bottom
+        // 2) user is already near bottom
+        if (isNewBottom && isAtBottom) {
+            listState.animateScrollToItem(messages.lastIndex)
+        }
+
+        lastMessageIdForScroll = newBottomId
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            val latest = messages.last()
-            if (latest.id != lastMessageIdForScroll) {
-                listState.animateScrollToItem(messages.lastIndex)
-                lastMessageIdForScroll = latest.id
-            }
-        }
-    }
-
+    // Highlight auto-clear for reply jump
     LaunchedEffect(highlightedMessageId) {
         val id = highlightedMessageId
         if (id != null) {
@@ -506,7 +514,6 @@ fun ChatScreen(
         val url = message.mediaUrl ?: return
         val uri = Uri.parse(url)
 
-        // Decide MIME hint based on mediaType
         val type = when (message.mediaType) {
             "image" -> "image/*"
             "video" -> "video/*"
@@ -516,13 +523,10 @@ fun ChatScreen(
 
         try {
             val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-                // For remote URLs this is fine too
                 setDataAndType(uri, type)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-
-            // ALWAYS show chooser, so you can pick Gallery / Photos, etc.
             val chooser = Intent.createChooser(viewIntent, "Open with")
             context.startActivity(chooser)
         } catch (e: Exception) {
@@ -537,13 +541,11 @@ fun ChatScreen(
     fun playOrPauseAudio(message: ChatMessage) {
         val url = message.mediaUrl ?: return
 
-        // If tapping the one already playing → stop
         if (currentlyPlayingId == message.id) {
             stopAudioPlayback()
             return
         }
 
-        // Start new playback
         stopAudioPlayback()
         val mp = MediaPlayer()
         audioPlayer = mp
@@ -607,9 +609,8 @@ fun ChatScreen(
                 .padding(paddingValues)
                 .fillMaxSize()
                 .imePadding()
-                .navigationBarsPadding()   // ⭐ FIX
-        )
-        {
+                .navigationBarsPadding()
+        ) {
             if (selectedThread == null) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -641,20 +642,17 @@ fun ChatScreen(
                             highlighted = (msg.id == highlightedMessageId),
                             isPlayingAudio = (msg.id == currentlyPlayingId),
 
-                            // --- LONG PRESS FIX (Patch 4) ---
                             onLongPress = {
                                 if (!mine) {
-                                    // reactions UI for other user's messages
                                     try {
                                         if (reactionPlayer.isPlaying) {
                                             reactionPlayer.seekTo(0)
                                         }
                                         reactionPlayer.start()
                                     } catch (_: Exception) {}
-
                                     vm.openReactionPicker(msg.id)
                                 } else {
-                                    // delete-for-me / delete-for-everyone dialog
+                                    // My message: open delete-for-me / delete-for-everyone
                                     messageForActions = msg
                                 }
                             },
@@ -668,14 +666,51 @@ fun ChatScreen(
                                 vm.openReactionPicker(msg.id)
                             },
 
-
                             currentUid = currentUid,
 
-                            // --- INLINE REPLY ---
-                            onReply = {
-                                vm.closeReactionPicker()   // hide small reaction bar
+                            // WhatsApp-style reply behavior:
+                            // - If this is a reply bubble (↩ header), tap = jump to original if possible.
+                            // - Else, tap = set as reply target in composer.
+                            onReply = { tappedMessage ->
+                                val body = tappedMessage.text
+                                if (body.startsWith("↩ ")) {
+                                    // Try to infer original from snippet
+                                    val parts = body.split("\n\n", limit = 2)
+                                    if (parts.isNotEmpty()) {
+                                        val header = parts[0]
+                                            .removePrefix("↩ ")
+                                            .trim()
+                                        val snippet = header.substringAfter(":", "")
+                                            .trim()
 
-                                replyTo = msg
+                                        if (snippet.isNotEmpty()) {
+                                            val target = messages.firstOrNull { original ->
+                                                if (original.id == tappedMessage.id) {
+                                                    false
+                                                } else when {
+                                                    original.text.isNotBlank() &&
+                                                            original.text.contains(snippet) -> true
+                                                    original.mediaType == "image" &&
+                                                            snippet == "[Image]" -> true
+                                                    original.mediaType == "video" &&
+                                                            snippet == "[Video]" -> true
+                                                    original.mediaType == "audio" &&
+                                                            snippet == "[Voice message]" -> true
+                                                    else -> false
+                                                }
+                                            }
+
+                                            if (target != null) {
+                                                vm.requestScrollTo(target.id)
+                                                return@ChatMessageBubble
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Normal reply to base message
+                                vm.closeReactionPicker()
+                                replyTo = tappedMessage
                             },
 
                             onMediaClick = { openMessageMedia(it) },
@@ -684,29 +719,24 @@ fun ChatScreen(
                     }
                 }
 
-// ⭐ Highlight + jump-to-message listener (for reply tap & ViewModel requests)
+                // ⭐ Scroll-to-message requests (reply preview / reply bubble)
                 val scrollTarget by vm.scrollToMessageId.collectAsState()
-
                 LaunchedEffect(scrollTarget) {
                     val targetId = scrollTarget ?: return@LaunchedEffect
-
                     val index = messages.indexOfFirst { it.id == targetId }
                     if (index >= 0) {
                         listState.animateScrollToItem(index)
                         highlightedMessageId = targetId
 
-                        // Flash highlight for 900ms
                         delay(900)
                         if (highlightedMessageId == targetId) {
                             highlightedMessageId = null
                         }
                     }
-
                     vm.clearScrollRequest()
                 }
 
-
-// Typing indicator
+                // Typing indicator
                 AnimatedVisibility(visible = isTyping) {
                     Text(
                         text = "Typing…",
@@ -718,7 +748,7 @@ fun ChatScreen(
                     )
                 }
 
-// Attachments preview
+                // Attachments preview
                 if (attachedMedia.isNotEmpty()) {
                     AttachmentPreviewRow(
                         items = attachedMedia,
@@ -728,17 +758,16 @@ fun ChatScreen(
                     )
                 }
 
-// Reply preview
+                // Reply preview bar (above composer) – tap = jump to original
                 ReplyPreview(
                     message = replyTo,
                     onClear = { replyTo = null },
                     onJumpToMessage = { target ->
                         vm.requestScrollTo(target.id)
                     }
-
                 )
 
-// Extra actions row (opened via +)
+                // Extra actions row (opened via +)
                 AnimatedVisibility(visible = showMoreActions) {
                     Row(
                         modifier = Modifier
@@ -784,7 +813,7 @@ fun ChatScreen(
                     }
                 }
 
-// Main composer row: + [pill] 🙂 👍/Send
+                // Main composer row: + [pill] 🙂 👍/Send
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -803,16 +832,16 @@ fun ChatScreen(
                     OutlinedTextField(
                         modifier = Modifier
                             .weight(1f)
-                            .heightIn(min = 44.dp)           // pill a bit taller
+                            .heightIn(min = 44.dp)
                             .onFocusChanged { state ->
+                                // WhatsApp-style: when you tap composer, show latest message
                                 if (state.isFocused && messages.isNotEmpty()) {
                                     scope.launch {
                                         listState.animateScrollToItem(messages.lastIndex)
                                     }
                                 }
                             },
-
-                                value = inputText,
+                        value = inputText,
                         onValueChange = { vm.setInputText(it) },
                         placeholder = {
                             Text(
@@ -822,14 +851,15 @@ fun ChatScreen(
                             )
                         },
                         maxLines = 4,
-                        singleLine = false, // allow wrapping
+                        singleLine = false,
                         textStyle = MaterialTheme.typography.bodyMedium.copy(
-                            color = MaterialTheme.colorScheme.onSurface   // 👈 force visible text
+                            color = MaterialTheme.colorScheme.onSurface
                         ),
-                        shape = RoundedCornerShape(20.dp),               // one shape only
-                        colors = OutlinedTextFieldDefaults.colors()      // default theming
+                        shape = RoundedCornerShape(20.dp),
+                        colors = OutlinedTextFieldDefaults.colors()
                     )
-                                       // Emoji button
+
+                    // Emoji button
                     IconButton(onClick = { showComposerEmoji = true }) {
                         Icon(
                             imageVector = Icons.Default.EmojiEmotions,
@@ -879,7 +909,6 @@ fun ChatScreen(
                             }
 
                             replyTo = null
-                            // 👇 auto-close the + tray after sending
                             showMoreActions = false
                         },
                         colors = IconButtonDefaults.iconButtonColors(
@@ -902,23 +931,19 @@ fun ChatScreen(
                         }
                     }
                 }
-
-                vm.clearScrollRequest()
             }
-
         }
     }
-// Close reaction bar when tapping outside messages
+
+    // Auto-close reaction bar after short delay
     LaunchedEffect(selectedMsgForReaction) {
         if (selectedMsgForReaction != null) {
-            // Monitor taps - if user clicks outside bubble, close it
-            // Easiest way: auto-close after small delay unless re-opened
             delay(3000)
             if (selectedMsgForReaction != null) vm.closeReactionPicker()
         }
     }
 
-    // Emoji picker
+    // Emoji picker (composer)
     if (showComposerEmoji) {
         ComposerEmojiPickerDialog(
             onDismiss = { showComposerEmoji = false },
@@ -928,7 +953,8 @@ fun ChatScreen(
             }
         )
     }
-// Emoji picker for message reactions (from + on ReactionBar)
+
+    // Emoji picker for message reactions (from + on ReactionBar)
     if (reactionPickerMessageId != null) {
         ComposerEmojiPickerDialog(
             onDismiss = {
@@ -958,6 +984,7 @@ fun ChatScreen(
             text = { Text(errorMessage ?: "") }
         )
     }
+
     // Delete / Unsend dialog for my messages
     if (messageForActions != null) {
         val target = messageForActions!!
@@ -1036,10 +1063,6 @@ fun ChatScreen(
    Message bubble with media + reactions
    ───────────────────────────── */
 
-/* ─────────────────────────────
-   Message bubble with media + reactions
-   ───────────────────────────── */
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatMessageBubble(
@@ -1052,7 +1075,7 @@ private fun ChatMessageBubble(
     onReactionSelected: (String) -> Unit,
     onMoreReactions: () -> Unit,
     currentUid: String?,
-    onReply: () -> Unit,
+    onReply: (ChatMessage) -> Unit,
     onMediaClick: (ChatMessage) -> Unit,
     onAudioClick: (ChatMessage) -> Unit
 ) {
@@ -1106,7 +1129,7 @@ private fun ChatMessageBubble(
                     )
                     .background(bgColor)
                     .combinedClickable(
-                        onClick = onReply,
+                        onClick = { onReply(message) },
                         onLongClick = onLongPress
                     )
                     .padding(horizontal = 10.dp, vertical = 6.dp)
@@ -1167,7 +1190,6 @@ private fun ChatMessageBubble(
                         }
 
                         else -> {
-                            // 📄 Generic document / file (PDF, Word, etc.)
                             val label = remember(message.mediaUrl) {
                                 val raw = message.mediaUrl?.lowercase() ?: ""
 
@@ -1222,11 +1244,9 @@ private fun ChatMessageBubble(
                     }
                 }
 
-                // ─── TEXT ───
-                val body = message.text
                 // ─── TEXT & DELETED MESSAGE HANDLING ───
+                val body = message.text
                 if (body == "This message was deleted") {
-                    // Soft-deleted text-only message (unsend)
                     Text(
                         text = "This message was deleted",
                         style = MaterialTheme.typography.bodySmall,
@@ -1234,14 +1254,12 @@ private fun ChatMessageBubble(
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
                     )
                 } else if (body.isNotBlank()) {
-                    // Normal message text
                     Text(
                         text = body,
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
                     )
                 }
-
 
                 if (timeText.isNotBlank()) {
                     Row(

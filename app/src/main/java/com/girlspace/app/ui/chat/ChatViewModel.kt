@@ -1,5 +1,8 @@
 package com.girlspace.app.ui.chat
 
+// GirlSpace – ChatViewModel.kt
+// Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
+
 import com.google.firebase.firestore.FieldValue
 import java.io.File
 import android.provider.OpenableColumns
@@ -50,6 +53,7 @@ class ChatViewModel : ViewModel() {
 
     private val _selectedThread = MutableStateFlow<ChatThread?>(null)
     val selectedThread: StateFlow<ChatThread?> = _selectedThread
+
     private val _scrollToMessageId = MutableStateFlow<String?>(null)
     val scrollToMessageId: StateFlow<String?> = _scrollToMessageId
 
@@ -798,7 +802,7 @@ class ChatViewModel : ViewModel() {
 
     // -------------------------------------------------------------
     // MEDIA SEND (gallery / file picker / voice notes)
-    // ------------------------------------------------------------
+    // -------------------------------------------------------------
 
     fun sendVoiceNote(filePath: String) {
         val thread = _selectedThread.value ?: return
@@ -1069,11 +1073,30 @@ class ChatViewModel : ViewModel() {
      * Delete for everyone (unsend):
      * - Soft delete in Firestore: blank text, clear mediaUrl/mediaType.
      * - Try deleting the media file from Storage (if any).
-     * Everyone will see "This message was deleted".
+     * - ALSO update local _allMessages/_messages immediately so UI changes instantly.
      */
     fun unsendMessage(messageId: String) {
         val threadId = _selectedThread.value?.id ?: return
 
+        // ✅ Optimistic local update so UI shows "This message was deleted" instantly
+        val updatedAll = _allMessages.value.map { msg ->
+            if (msg.id == messageId) {
+                msg.copy(
+                    text = "This message was deleted",
+                    mediaUrl = null,
+                    mediaType = null
+                )
+            } else msg
+        }
+        _allMessages.value = updatedAll
+
+        val deletedLocalIds = _locallyDeletedIds.value
+        val visibleSlice = updatedAll
+            .takeLast(loadedMessageCount)
+            .filter { it.id !in deletedLocalIds }
+        _messages.value = visibleSlice
+
+        // 🔁 Remote Firestore + Storage update
         viewModelScope.launch {
             try {
                 val docRef = firestore.collection("chatThreads")
@@ -1086,7 +1109,6 @@ class ChatViewModel : ViewModel() {
 
                 val mediaUrl = snap.getString("mediaUrl")
 
-                // Soft delete fields
                 docRef.update(
                     mapOf(
                         "text" to "This message was deleted",
@@ -1095,7 +1117,6 @@ class ChatViewModel : ViewModel() {
                     )
                 ).await()
 
-                // Best effort: delete file from storage if it exists
                 if (!mediaUrl.isNullOrBlank()) {
                     try {
                         val ref = storage.getReferenceFromUrl(mediaUrl)
@@ -1110,6 +1131,7 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
     fun requestScrollTo(messageId: String) {
         _scrollToMessageId.value = messageId
     }
