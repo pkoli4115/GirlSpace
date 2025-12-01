@@ -8,7 +8,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.girlspace.app.ui.billing.PremiumScreen
-import com.girlspace.app.ui.chat.ChatScreen
+import com.girlspace.app.ui.chat.ChatScreenV2
 import com.girlspace.app.ui.groups.GroupChatScreen
 import com.girlspace.app.ui.home.HomeRoot
 import com.girlspace.app.ui.login.LoginScreen
@@ -178,7 +178,7 @@ fun GirlSpaceApp() {
             ) { backStackEntry ->
                 val threadId = backStackEntry.arguments?.getString("threadId") ?: return@composable
 
-                ChatScreen(
+                ChatScreenV2(
                     threadId = threadId,
                     onBack = { navController.popBackStack() }
                 )
