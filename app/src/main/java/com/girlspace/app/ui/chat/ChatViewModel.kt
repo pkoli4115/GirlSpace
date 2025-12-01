@@ -1,5 +1,6 @@
 package com.girlspace.app.ui.chat
-import  com.google.firebase.firestore.FieldValue
+
+import com.google.firebase.firestore.FieldValue
 import java.io.File
 import android.provider.OpenableColumns
 
@@ -49,6 +50,11 @@ class ChatViewModel : ViewModel() {
 
     private val _selectedThread = MutableStateFlow<ChatThread?>(null)
     val selectedThread: StateFlow<ChatThread?> = _selectedThread
+    private val _scrollToMessageId = MutableStateFlow<String?>(null)
+    val scrollToMessageId: StateFlow<String?> = _scrollToMessageId
+
+    private val _highlightMessageId = MutableStateFlow<String?>(null)
+    val highlightMessageId: StateFlow<String?> = _highlightMessageId
 
     // Messages (with simple pagination)
     private val _allMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
@@ -57,6 +63,9 @@ class ChatViewModel : ViewModel() {
 
     private var loadedMessageCount: Int = 30
     private val pageSize: Int = 30
+
+    // locally "deleted for me" message ids (per device only)
+    private val _locallyDeletedIds = MutableStateFlow<Set<String>>(emptySet())
 
     private val _inputText = MutableStateFlow("")
     val inputText: StateFlow<String> = _inputText
@@ -541,7 +550,10 @@ class ChatViewModel : ViewModel() {
 
             // pagination: keep last [loadedMessageCount]
             val slice = msgs.takeLast(loadedMessageCount)
-            _messages.value = slice
+
+            // apply local "delete for me" filter
+            val deleted = _locallyDeletedIds.value
+            _messages.value = slice.filter { it.id !in deleted }
 
             markMessagesAsReadForCurrentUser(slice)
         }
@@ -659,7 +671,9 @@ class ChatViewModel : ViewModel() {
         loadedMessageCount = (loadedMessageCount + pageSize)
             .coerceAtMost(all.size)
 
-        _messages.value = all.takeLast(loadedMessageCount)
+        val slice = all.takeLast(loadedMessageCount)
+        val deleted = _locallyDeletedIds.value
+        _messages.value = slice.filter { it.id !in deleted }
     }
 
     // Mark messages as read for ticks
@@ -690,7 +704,6 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
-
 
     // -------------------------------------------------------------
     // TYPING STATE
@@ -786,9 +799,7 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------
     // MEDIA SEND (gallery / file picker / voice notes)
     // ------------------------------------------------------------
-    // -------------------------------------------------------------
-    // VOICE NOTE SEND (file path from ChatScreen)
-    // -------------------------------------------------------------
+
     fun sendVoiceNote(filePath: String) {
         val thread = _selectedThread.value ?: return
 
@@ -839,12 +850,6 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    // -------------------------------------------------------------
-// MEDIA SEND (gallery / file picker / voice notes)
-// -------------------------------------------------------------
-// -------------------------------------------------------------
-// MEDIA SEND (gallery / file picker / voice notes)
-// -------------------------------------------------------------
     fun sendMedia(context: Context, uri: Uri) {
         val thread = _selectedThread.value ?: return
 
@@ -956,7 +961,6 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-
     // -------------------------------------------------------------
     // MEDIA SEND (camera capture → still image)
     // Used by CameraCaptureScreen: vm.sendCapturedImage(context, uri, threadId)
@@ -1046,41 +1050,80 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------
     // DELETE / UNSEND
     // -------------------------------------------------------------
-    fun deleteMessageForMe(messageId: String) {
-        val threadId = _selectedThread.value?.id ?: return
 
-        viewModelScope.launch {
-            try {
-                // For now: hard delete from Firestore
-                firestore.collection("chatThreads")
-                    .document(threadId)
-                    .collection("messages")
-                    .document(messageId)
-                    .delete()
-                    .await()
-            } catch (e: Exception) {
-                _errorMessage.value = e.message
-                Log.e("ChatViewModel", "deleteMessageForMe failed", e)
-            }
-        }
+    /**
+     * Delete for me:
+     * - Do NOT touch Firestore.
+     * - Just hide this message locally using _locallyDeletedIds.
+     */
+    fun deleteMessageForMe(messageId: String) {
+        _locallyDeletedIds.value = _locallyDeletedIds.value + messageId
+
+        // apply filter immediately
+        val slice = _allMessages.value.takeLast(loadedMessageCount)
+        val deleted = _locallyDeletedIds.value
+        _messages.value = slice.filter { it.id !in deleted }
     }
 
+    /**
+     * Delete for everyone (unsend):
+     * - Soft delete in Firestore: blank text, clear mediaUrl/mediaType.
+     * - Try deleting the media file from Storage (if any).
+     * Everyone will see "This message was deleted".
+     */
     fun unsendMessage(messageId: String) {
         val threadId = _selectedThread.value?.id ?: return
 
         viewModelScope.launch {
             try {
-                // For now: also hard delete (we can later change this to placeholder text)
-                firestore.collection("chatThreads")
+                val docRef = firestore.collection("chatThreads")
                     .document(threadId)
                     .collection("messages")
                     .document(messageId)
-                    .delete()
-                    .await()
+
+                val snap = docRef.get().await()
+                if (!snap.exists()) return@launch
+
+                val mediaUrl = snap.getString("mediaUrl")
+
+                // Soft delete fields
+                docRef.update(
+                    mapOf(
+                        "text" to "This message was deleted",
+                        "mediaUrl" to null,
+                        "mediaType" to null
+                    )
+                ).await()
+
+                // Best effort: delete file from storage if it exists
+                if (!mediaUrl.isNullOrBlank()) {
+                    try {
+                        val ref = storage.getReferenceFromUrl(mediaUrl)
+                        ref.delete().await()
+                    } catch (e: Exception) {
+                        Log.w("ChatViewModel", "Failed to delete media from storage", e)
+                    }
+                }
             } catch (e: Exception) {
                 _errorMessage.value = e.message
                 Log.e("ChatViewModel", "unsendMessage failed", e)
             }
+        }
+    }
+    fun requestScrollTo(messageId: String) {
+        _scrollToMessageId.value = messageId
+    }
+
+    fun clearScrollRequest() {
+        _scrollToMessageId.value = null
+    }
+
+    fun highlightMessage(messageId: String) {
+        _highlightMessageId.value = messageId
+        // auto-clear after 1.5 sec
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1500)
+            _highlightMessageId.value = null
         }
     }
 

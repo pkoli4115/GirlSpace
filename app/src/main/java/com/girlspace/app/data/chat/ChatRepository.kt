@@ -276,21 +276,30 @@ class ChatRepository(
             @Suppress("UNCHECKED_CAST")
             val reactionsMap = get("reactions") as? Map<String, String> ?: emptyMap()
 
+            // --- Soft-delete normalization (critical for media delete) ---
+            val rawText = getString("text") ?: ""
+            val deleted = rawText == "This message was deleted"
+
+// If deleted → null out media fields client-side, even if old DB had stale values
+            val finalMediaUrl = if (deleted) null else getString("mediaUrl")
+            val finalMediaType = if (deleted) null else getString("mediaType")
+
             ChatMessage(
                 id = getString("id") ?: "",
                 threadId = getString("threadId") ?: "",
                 senderId = getString("senderId") ?: "",
                 senderName = getString("senderName") ?: "",
-                text = getString("text") ?: "",
-                mediaUrl = getString("mediaUrl"),
-                mediaType = getString("mediaType"),
-                mediaThumbnail = getString("mediaThumbnail"),
-                audioDuration = getLong("audioDuration"),
+                text = rawText,
+                mediaUrl = finalMediaUrl,
+                mediaType = finalMediaType,
+                mediaThumbnail = if (deleted) null else getString("mediaThumbnail"),
+                audioDuration = if (deleted) null else getLong("audioDuration"),
                 replyTo = getString("replyTo"),
                 createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
                 readBy = (get("readBy") as? List<String>) ?: emptyList(),
                 reactions = reactionsMap
             )
+
         } catch (e: Exception) {
             Log.e("ChatRepository", "toChatMessage failed", e)
             null

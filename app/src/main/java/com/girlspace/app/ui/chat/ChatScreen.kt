@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -147,6 +148,8 @@ fun ChatScreen(
     var messageForActions by remember { mutableStateOf<ChatMessage?>(null) }
 
     var showComposerEmoji by remember { mutableStateOf(false) }
+    var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }   // NEW
+
     var showMoreActions by remember { mutableStateOf(false) }
 
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
@@ -178,19 +181,21 @@ fun ChatScreen(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
+    // Auto-scroll ONLY if user is at bottom
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            val latest = messages.last()
-            if (latest.id != lastMessageIdForSound && latest.senderId != currentUid) {
-                try {
-                    if (reactionPlayer.isPlaying) {
-                        reactionPlayer.seekTo(0)
-                    }
-                    reactionPlayer.start()
-                } catch (_: Exception) {
+
+            val isAtBottom =
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ==
+                        listState.layoutInfo.totalItemsCount - 1
+
+            if (isAtBottom) {
+                scope.launch {
+                    listState.animateScrollToItem(messages.lastIndex)
                 }
             }
-            lastMessageIdForSound = latest.id
+
+            lastMessageIdForScroll = messages.last().id
         }
     }
 
@@ -602,7 +607,9 @@ fun ChatScreen(
                 .padding(paddingValues)
                 .fillMaxSize()
                 .imePadding()
-        ) {
+                .navigationBarsPadding()   // ⭐ FIX
+        )
+        {
             if (selectedThread == null) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -626,47 +633,80 @@ fun ChatScreen(
                 ) {
                     items(messages, key = { it.id }) { msg ->
                         val mine = msg.senderId == currentUid
+
                         ChatMessageBubble(
                             message = msg,
                             mine = mine,
                             showReactionBar = !mine && selectedMsgForReaction == msg.id,
                             highlighted = (msg.id == highlightedMessageId),
                             isPlayingAudio = (msg.id == currentlyPlayingId),
+
+                            // --- LONG PRESS FIX (Patch 4) ---
                             onLongPress = {
                                 if (!mine) {
-                                    // Long-press on OTHER user's message → reactions
+                                    // reactions UI for other user's messages
                                     try {
                                         if (reactionPlayer.isPlaying) {
                                             reactionPlayer.seekTo(0)
                                         }
                                         reactionPlayer.start()
-                                    } catch (_: Exception) {
-                                    }
+                                    } catch (_: Exception) {}
+
                                     vm.openReactionPicker(msg.id)
                                 } else {
-                                    // Long-press on MY message → delete / unsend dialog
+                                    // delete-for-me / delete-for-everyone dialog
                                     messageForActions = msg
                                 }
                             },
+
                             onReactionSelected = { emoji ->
                                 vm.reactToMessage(msg.id, emoji)
                                 vm.closeReactionPicker()
                             },
                             onMoreReactions = {
+                                reactionPickerMessageId = msg.id
                                 vm.openReactionPicker(msg.id)
                             },
+
+
                             currentUid = currentUid,
+
+                            // --- INLINE REPLY ---
                             onReply = {
+                                vm.closeReactionPicker()   // hide small reaction bar
+
                                 replyTo = msg
                             },
+
                             onMediaClick = { openMessageMedia(it) },
                             onAudioClick = { playOrPauseAudio(it) }
                         )
-
                     }
                 }
 
-                // Typing indicator
+// ⭐ Highlight + jump-to-message listener (for reply tap & ViewModel requests)
+                val scrollTarget by vm.scrollToMessageId.collectAsState()
+
+                LaunchedEffect(scrollTarget) {
+                    val targetId = scrollTarget ?: return@LaunchedEffect
+
+                    val index = messages.indexOfFirst { it.id == targetId }
+                    if (index >= 0) {
+                        listState.animateScrollToItem(index)
+                        highlightedMessageId = targetId
+
+                        // Flash highlight for 900ms
+                        delay(900)
+                        if (highlightedMessageId == targetId) {
+                            highlightedMessageId = null
+                        }
+                    }
+
+                    vm.clearScrollRequest()
+                }
+
+
+// Typing indicator
                 AnimatedVisibility(visible = isTyping) {
                     Text(
                         text = "Typing…",
@@ -678,7 +718,7 @@ fun ChatScreen(
                     )
                 }
 
-                // Attachments preview
+// Attachments preview
                 if (attachedMedia.isNotEmpty()) {
                     AttachmentPreviewRow(
                         items = attachedMedia,
@@ -688,28 +728,17 @@ fun ChatScreen(
                     )
                 }
 
-                // Reply preview
+// Reply preview
                 ReplyPreview(
                     message = replyTo,
                     onClear = { replyTo = null },
                     onJumpToMessage = { target ->
-                        val index = messages.indexOfFirst { it.id == target.id }
-                        if (index >= 0) {
-                            scope.launch {
-                                listState.animateScrollToItem(index)
-                            }
-                            highlightedMessageId = target.id
-                        } else {
-                            Toast.makeText(
-                                context,
-                                "Original message is too old to jump to.",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
+                        vm.requestScrollTo(target.id)
                     }
+
                 )
 
-                // Extra actions row (opened via +)
+// Extra actions row (opened via +)
                 AnimatedVisibility(visible = showMoreActions) {
                     Row(
                         modifier = Modifier
@@ -755,7 +784,7 @@ fun ChatScreen(
                     }
                 }
 
-                // Main composer row: + [pill] 🙂 👍/Send
+// Main composer row: + [pill] 🙂 👍/Send
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -782,7 +811,8 @@ fun ChatScreen(
                                     }
                                 }
                             },
-                        value = inputText,
+
+                                value = inputText,
                         onValueChange = { vm.setInputText(it) },
                         placeholder = {
                             Text(
@@ -799,8 +829,7 @@ fun ChatScreen(
                         shape = RoundedCornerShape(20.dp),               // one shape only
                         colors = OutlinedTextFieldDefaults.colors()      // default theming
                     )
-
-                    // Emoji button
+                                       // Emoji button
                     IconButton(onClick = { showComposerEmoji = true }) {
                         Icon(
                             imageVector = Icons.Default.EmojiEmotions,
@@ -874,7 +903,18 @@ fun ChatScreen(
                     }
                 }
 
+                vm.clearScrollRequest()
             }
+
+        }
+    }
+// Close reaction bar when tapping outside messages
+    LaunchedEffect(selectedMsgForReaction) {
+        if (selectedMsgForReaction != null) {
+            // Monitor taps - if user clicks outside bubble, close it
+            // Easiest way: auto-close after small delay unless re-opened
+            delay(3000)
+            if (selectedMsgForReaction != null) vm.closeReactionPicker()
         }
     }
 
@@ -885,6 +925,23 @@ fun ChatScreen(
             onEmojiSelected = { emoji ->
                 vm.setInputText(inputText + emoji)
                 showComposerEmoji = false
+            }
+        )
+    }
+// Emoji picker for message reactions (from + on ReactionBar)
+    if (reactionPickerMessageId != null) {
+        ComposerEmojiPickerDialog(
+            onDismiss = {
+                reactionPickerMessageId = null
+                vm.closeReactionPicker()
+            },
+            onEmojiSelected = { emoji ->
+                val targetId = reactionPickerMessageId
+                if (targetId != null) {
+                    vm.reactToMessage(targetId, emoji)
+                }
+                reactionPickerMessageId = null
+                vm.closeReactionPicker()
             }
         )
     }
@@ -1167,13 +1224,24 @@ private fun ChatMessageBubble(
 
                 // ─── TEXT ───
                 val body = message.text
-                if (body.isNotBlank()) {
+                // ─── TEXT & DELETED MESSAGE HANDLING ───
+                if (body == "This message was deleted") {
+                    // Soft-deleted text-only message (unsend)
+                    Text(
+                        text = "This message was deleted",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color.Gray,
+                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
+                    )
+                } else if (body.isNotBlank()) {
+                    // Normal message text
                     Text(
                         text = body,
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
                     )
                 }
+
 
                 if (timeText.isNotBlank()) {
                     Row(
