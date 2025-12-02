@@ -1026,6 +1026,9 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------
 // SEND CONTACT MESSAGE
 // -------------------------------------------------------------
+    // -------------------------------------------------------------
+// SEND CONTACT MESSAGE
+// -------------------------------------------------------------
     fun sendContactMessage(
         name: String,
         phones: List<String>,
@@ -1035,16 +1038,20 @@ class ChatViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val contactMap = mapOf(
+                val rawMap: Map<String, Any?> = mapOf(
                     "name" to name,
                     "phones" to phones,
                     "email" to email
-                ).filterValues { it != null } as Map<String, Any>
+                )
+
+                @Suppress("UNCHECKED_CAST")
+                val contactMap = rawMap
+                    .filterValues { it != null } as Map<String, Any>
 
                 repo.sendMessage(
                     threadId = thread.id,
-                    text = "",
-                    mediaType = "contact",
+                    text = name,            // ✅ text now holds contact name
+                    mediaType = "contact",  // ✅ special type
                     mediaUrl = null,
                     extra = contactMap
                 )

@@ -7,7 +7,11 @@ package com.girlspace.app.ui.chat
 // - Adds: WA-style selection bar, camera in bottom bar, real location/contact
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
-
+import com.google.firebase.Firebase
+import android.content.ClipData
+import com.google.firebase.storage.storage
+import androidx.compose.material.icons.filled.StarBorder
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collectLatest
 import android.Manifest
@@ -214,6 +218,10 @@ fun ChatScreenV2(
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
     var showPermissionSettingsFor by remember { mutableStateOf<V2PermissionType?>(null) }
 
+    // 🐝 Bee sound: track last message we already notified for
+    var lastBeeNotifiedMessageId by remember { mutableStateOf<String?>(null) }
+    var hasBeeInit by remember { mutableStateOf(false) }
+
     val attachedMedia = remember { mutableStateListOf<V2AttachedMedia>() }
 
     var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
@@ -375,6 +383,37 @@ fun ChatScreenV2(
             if (highlightedMessageId == id) {
                 highlightedMessageId = null
             }
+        }
+    }
+
+    // 🐝 Bee sound on NEW incoming messages (not on initial load, not your own sends)
+    LaunchedEffect(messages, currentUid) {
+        if (messages.isEmpty()) return@LaunchedEffect
+        val latest = messages.last()
+
+        // Skip the very first load so we don't bee for history
+        if (!hasBeeInit) {
+            hasBeeInit = true
+            lastBeeNotifiedMessageId = latest.id
+            return@LaunchedEffect
+        }
+
+        // Only bee when:
+        //  - message ID changed (truly new)
+        //  - sender is NOT the current user
+        if (latest.id != lastBeeNotifiedMessageId && latest.senderId != currentUid) {
+            try {
+                if (reactionPlayer.isPlaying) {
+                    reactionPlayer.seekTo(0)
+                }
+                reactionPlayer.start()
+            } catch (_: Exception) {
+                // ignore audio errors
+            }
+            lastBeeNotifiedMessageId = latest.id
+        } else {
+            // keep state in sync even for own messages
+            lastBeeNotifiedMessageId = latest.id
         }
     }
 
@@ -1061,38 +1100,202 @@ fun ChatScreenV2(
     LaunchedEffect(searchQuery, messages.size) {
         recalcSearchMatches()
     }
-
     // ───────────────────── Share via system intent ─────────────────────
-
+    // ───────────────────── Share via system intent ─────────────────────
     fun shareMessagesExternally(toShare: List<ChatMessage>) {
         if (toShare.isEmpty()) {
             Toast.makeText(context, "Nothing to share", Toast.LENGTH_SHORT).show()
             return
         }
-        val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
-        val text = buildString {
-            toShare.sortedBy { it.createdAt.toDate().time }.forEach { msg ->
-                val time = sdf.format(msg.createdAt.toDate())
-                val sender =
-                    if (msg.senderId == currentUid) "You"
-                    else msg.senderName.ifBlank { "GirlSpace user" }
 
-                val content = when {
-                    msg.text.isNotBlank() -> msg.text
-                    msg.mediaType == "image" -> "[Image]"
-                    msg.mediaType == "video" -> "[Video]"
-                    msg.mediaType == "audio" -> "[Voice message]"
-                    else -> "[Message]"
-                }
-                append("[$time] $sender: $content\n")
+        scope.launch {
+            val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
+
+            // 1) Build WhatsApp-style text transcript
+            val text = buildString {
+                toShare
+                    .sortedBy { it.createdAt.toDate().time }
+                    .forEach { msg ->
+                        val time = sdf.format(msg.createdAt.toDate())
+                        val sender =
+                            if (msg.senderId == currentUid) "You"
+                            else msg.senderName.ifBlank { "GirlSpace user" }
+
+                        val mt = msg.mediaType.orEmpty()
+                        val hasMedia = mt.isNotBlank() && mt != "text"
+
+                        val content = when {
+                            // IMAGES
+                            hasMedia && mt == "image" -> {
+                                val caption = msg.text.takeIf { it.isNotBlank() }
+                                if (caption != null) "[Image] $caption" else "[Image]"
+                            }
+
+                            // VIDEOS
+                            hasMedia && mt == "video" -> {
+                                val caption = msg.text.takeIf { it.isNotBlank() }
+                                if (caption != null) "[Video] $caption" else "[Video]"
+                            }
+
+                            // VOICE / AUDIO
+                            hasMedia && mt == "audio" -> {
+                                val dur = msg.voiceDurationLabel
+                                if (dur != null) "[Voice message] ($dur)"
+                                else "[Voice message]"
+                            }
+
+                            // FILE / PDF / DOC / ZIP
+                            hasMedia && mt == "file" -> {
+                                val fileName = msg.fileDisplayName
+                                if (fileName != null) "[File] $fileName" else "[File]"
+                            }
+
+                            // LOCATION
+                            hasMedia && (mt == "location" || mt == "live_location") -> {
+                                val address = msg.text.takeIf { it.isNotBlank() } ?: "Location"
+                                val mapsLink =
+                                    "https://maps.google.com/?q=${Uri.encode(address)}"
+                                "[Location] $address $mapsLink"
+                            }
+
+                            // CONTACT
+                            hasMedia && mt == "contact" -> {
+                                val fromText = msg.text
+                                    .takeIf { it.isNotBlank() && it != "Contact" }
+
+                                val fromExtra = msg.contactDisplayName
+                                val name = fromText ?: fromExtra ?: "Contact"
+
+                                val phones = msg.contactPhones
+                                val emailFromExtra = msg.contactEmail
+
+                                val phonePart = if (phones.isNotEmpty()) {
+                                    phones.joinToString(", ")
+                                } else {
+                                    ""
+                                }
+
+                                val emailPart = emailFromExtra
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { if (phonePart.isNotEmpty()) " | $it" else it }
+                                    ?: ""
+
+                                val details = buildString {
+                                    if (phonePart.isNotEmpty()) append(phonePart)
+                                    if (emailPart.isNotEmpty()) append(emailPart)
+                                }
+
+                                if (details.isNotEmpty()) {
+                                    "[Contact] $name – $details"
+                                } else {
+                                    "[Contact] $name"
+                                }
+                            }
+
+                            // TEXT
+                            msg.text.isNotBlank() -> msg.text
+
+                            else -> "[Message]"
+                        }
+
+                        append("[$time] $sender: $content\n")
+                    }
             }
-        }
 
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, text)
+            // 2) Collect attachment messages and resolve URIs
+            val attachmentMessages = toShare.filter { !it.mediaUrl.isNullOrBlank() }
+            android.util.Log.d(
+                "ChatShare",
+                "shareMessagesExternally: total=${toShare.size}, attachments=${attachmentMessages.size}"
+            )
+
+            val uris = mutableListOf<Uri>()
+            for (msg in attachmentMessages) {
+                android.util.Log.d(
+                    "ChatShare",
+                    "Attachment candidate id=${msg.id}, mediaType=${msg.mediaType}, mediaUrl=${msg.mediaUrl}"
+                )
+                val uri = resolveAttachmentUri(context, msg)
+                android.util.Log.d("ChatShare", "Resolved URI for ${msg.id}: $uri")
+                if (uri != null) {
+                    uris.add(uri)
+                }
+            }
+
+            android.util.Log.d("ChatShare", "Final URIs count = ${uris.size}")
+
+            // 3) Choose MIME type based on first attachment
+            val mimeType: String = if (uris.isNotEmpty()) {
+                val firstMsg = attachmentMessages.firstOrNull()
+                when (firstMsg?.mediaType) {
+                    "image" -> "image/*"
+                    "video" -> "video/*"
+                    "audio" -> "audio/*"
+                    "file"  -> {
+                        val name = firstMsg.fileDisplayName?.lowercase(Locale.getDefault())
+                        when {
+                            name?.endsWith(".pdf") == true -> "application/pdf"
+                            name?.endsWith(".doc") == true ||
+                                    name?.endsWith(".docx") == true -> "application/msword"
+                            name?.endsWith(".ppt") == true ||
+                                    name?.endsWith(".pptx") == true -> "application/vnd.ms-powerpoint"
+                            name?.endsWith(".xls") == true ||
+                                    name?.endsWith(".xlsx") == true -> "application/vnd.ms-excel"
+                            else -> "*/*"
+                        }
+                    }
+                    else -> "*/*"
+                }
+            } else {
+                "text/plain"
+            }
+
+            // 4) Build intent with correct MIME and ClipData
+            val intent = when {
+                uris.size == 1 -> {
+                    val uri = uris.first()
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_TEXT, text)
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+                        // Extra hint for some apps (WhatsApp/Gmail)
+                        clipData = ClipData.newRawUri("attachment", uri)
+                    }
+                }
+
+                uris.size > 1 -> {
+                    Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_TEXT, text)
+                        putParcelableArrayListExtra(
+                            Intent.EXTRA_STREAM,
+                            ArrayList(uris)
+                        )
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+                        // Also set ClipData with all URIs
+                        val first = uris.first()
+                        val clip = ClipData.newRawUri("attachment", first)
+                        uris.drop(1).forEach { u ->
+                            clip.addItem(ClipData.Item(u))
+                        }
+                        clipData = clip
+                    }
+                }
+
+                else -> {
+                    // Fallback: text-only
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, text)
+                    }
+                }
+            }
+
+            context.startActivity(Intent.createChooser(intent, "Share chat"))
         }
-        context.startActivity(Intent.createChooser(intent, "Share chat"))
     }
 
     // ───────────────────── Block user & add participants ─────────────────────
@@ -1185,19 +1388,49 @@ fun ChatScreenV2(
                         shareMessagesExternally(toShare)
                         onShareThread()
                     },
+
+
                     onInfoClick = { showInfoDialog = true },
                     onReportClick = { showReportDialog = true },
                     onBlockClick = { showBlockConfirm = true },
                     onAddParticipantsClick = { showAddParticipantsDialog = true }
                 )
             } else {
+                // 🔹 Compute selected messages and capabilities
+                val selectedMessages = messages.filter { it.id in selectedMessageIds }
+
+// Reply only when exactly 1 message is selected
+                val canReply = selectedMessages.size == 1
+
+// Share / Forward only when at least one attachment / location / contact is selected
+                val canShareOrForward = selectedMessages.any { msg ->
+                    val mt = msg.mediaType.orEmpty()
+                    val hasMediaUrl = !msg.mediaUrl.isNullOrBlank()
+
+                    val isAttachmentType = mt in listOf(
+                        "image",
+                        "video",
+                        "audio",
+                        "file",
+                        "location",
+                        "live_location",
+                        "contact"
+                    )
+
+                    hasMediaUrl || isAttachmentType
+                }
+
+
                 SelectionTopBarV2(
                     count = selectedMessageIds.size,
+                    canReply = canReply,
+                    canShareOrForward = canShareOrForward,
                     onClearSelection = {
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
                     onReply = {
+                        if (!canReply) return@SelectionTopBarV2
                         // Reply to the first selected in chronological order
                         val msg = messages.firstOrNull { it.id in selectedMessageIds }
                         if (msg != null) {
@@ -1244,12 +1477,14 @@ fun ChatScreenV2(
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
+
                     onMoreShare = {
                         val toShare = messages.filter { it.id in selectedMessageIds }
                         shareMessagesExternally(toShare)
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
+
                     onPin = {
                         selectedMessageIds.forEach { id ->
                             vm.reactToMessage(id, "📌")
@@ -1265,6 +1500,7 @@ fun ChatScreenV2(
                 )
             }
         }
+
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -1436,7 +1672,7 @@ fun ChatScreenV2(
                         }
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Videocam, // visually camera-like; you can swap if you have another icon
+                            imageVector = Icons.Default.PhotoCamera, // visually camera-like; you can swap if you have another icon
                             contentDescription = "Camera",
                             tint = MaterialTheme.colorScheme.primary
                         )
@@ -2038,6 +2274,8 @@ private fun ChatTopBarV2(
 @Composable
 private fun SelectionTopBarV2(
     count: Int,
+    canReply: Boolean,
+    canShareOrForward: Boolean,
     onClearSelection: () -> Unit,
     onReply: () -> Unit,
     onStar: () -> Unit,
@@ -2047,7 +2285,7 @@ private fun SelectionTopBarV2(
     onPin: () -> Unit,
     onReport: () -> Unit
 ) {
-    var showMenu by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
 
     TopAppBar(
         title = {
@@ -2065,59 +2303,77 @@ private fun SelectionTopBarV2(
             }
         },
         actions = {
-            IconButton(onClick = onReply) {
-                Icon(
-                    imageVector = Icons.Default.Reply,
-                    contentDescription = "Reply"
-                )
+            // Reply only when exactly one message selected
+            if (canReply) {
+                IconButton(onClick = onReply) {
+                    Icon(
+                        imageVector = Icons.Default.Reply,
+                        contentDescription = "Reply"
+                    )
+                }
             }
+
+            // Star is always visible (WhatsApp-style)
             IconButton(onClick = onStar) {
                 Icon(
-                    imageVector = Icons.Default.Star,
+                    imageVector = Icons.Default.StarBorder,
                     contentDescription = "Star"
                 )
             }
+
+            // Forward only if some media/contact/location is selected
+            if (canShareOrForward) {
+                IconButton(onClick = onForward) {
+                    Icon(
+                        imageVector = Icons.Default.Forward,
+                        contentDescription = "Forward"
+                    )
+                }
+            }
+
+            // Delete always visible
             IconButton(onClick = onDelete) {
                 Icon(
                     imageVector = Icons.Default.Delete,
                     contentDescription = "Delete"
                 )
             }
-            IconButton(onClick = onForward) {
-                Icon(
-                    imageVector = Icons.Default.Forward,
-                    contentDescription = "Forward"
-                )
-            }
-            IconButton(onClick = { showMenu = true }) {
+
+            // Overflow: Share / Pin / Report
+            IconButton(onClick = { menuExpanded = true }) {
                 Icon(
                     imageVector = Icons.Default.MoreVert,
-                    contentDescription = "More"
+                    contentDescription = "More options"
                 )
             }
 
             DropdownMenu(
-                expanded = showMenu,
-                onDismissRequest = { showMenu = false }
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false }
             ) {
-                DropdownMenuItem(
-                    text = { Text("Share") },
-                    onClick = {
-                        showMenu = false
-                        onMoreShare()
-                    }
-                )
+                // Single Share entry, only if media/contact/location present
+                if (canShareOrForward) {
+                    DropdownMenuItem(
+                        text = { Text("Share") },
+                        onClick = {
+                            menuExpanded = false
+                            onMoreShare()
+                        }
+                    )
+                }
+
                 DropdownMenuItem(
                     text = { Text("Pin") },
                     onClick = {
-                        showMenu = false
+                        menuExpanded = false
                         onPin()
                     }
                 )
+
                 DropdownMenuItem(
                     text = { Text("Report") },
                     onClick = {
-                        showMenu = false
+                        menuExpanded = false
                         onReport()
                     }
                 )
@@ -2128,6 +2384,7 @@ private fun SelectionTopBarV2(
         )
     )
 }
+
 
 /* ─────────────────────────────
    In-chat search bar
@@ -2210,7 +2467,110 @@ private fun ChatMessage.contactPayloadOrNull(): V2ContactPayload? {
     if (phones.isEmpty() && email == null) return null
     return V2ContactPayload(name, phones, email)
 }
+/* ─────────────────────────────
+   Attachment URI resolver
+   ───────────────────────────── */
 
+/* ─────────────────────────────
+   Attachment URI resolver (download → cache → FileProvider)
+   ───────────────────────────── */
+
+/* ─────────────────────────────
+   Attachment URI resolver
+   ───────────────────────────── */
+
+private suspend fun resolveAttachmentUri(
+    context: Context,
+    msg: ChatMessage
+): Uri? {
+    val urlStr = msg.mediaUrl ?: return null
+    android.util.Log.d(
+        "ChatShare",
+        "resolveAttachmentUri mediaUrl=$urlStr mediaType=${msg.mediaType}"
+    )
+
+    val parsed = try {
+        Uri.parse(urlStr)
+    } catch (e: Exception) {
+        android.util.Log.e("ChatShare", "Uri.parse failed", e)
+        null
+    }
+
+    // 1) Already-local content:// or file:// URIs → use directly
+    if (parsed != null && (parsed.scheme == "content" || parsed.scheme == "file")) {
+        android.util.Log.d("ChatShare", "Using direct local URI: $parsed")
+        return parsed
+    }
+
+    // 2) HTTP or HTTPS URL (Firebase hosted or any host) → download into cache
+    return try {
+        val fileNameGuess = msg.fileDisplayName ?: "attachment_${msg.id}"
+        val safeName = fileNameGuess.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+
+        val file = File(context.cacheDir, "share_$safeName")
+        android.util.Log.d("ChatShare", "Downloading to ${file.absolutePath}")
+
+        withContext(Dispatchers.IO) {
+            java.net.URL(urlStr).openStream().use { input ->
+                file.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+        }
+
+        android.util.Log.d("ChatShare", "Download OK, wrapping with FileProvider")
+        FileProvider.getUriForFile(
+            context,
+            "com.girlspace.app.fileprovider",
+            file
+        )
+    } catch (e: Exception) {
+        android.util.Log.e("ChatShare", "HTTP download failed", e)
+        null
+    }
+}
+
+/* ─────────────────────────────
+   ChatMessage helpers for sharing
+   ───────────────────────────── */
+
+// Extract contact name from extra payload
+private val ChatMessage.contactDisplayName: String?
+    get() = (extra as? Map<*, *>)?.get("name") as? String
+
+// Extract phone numbers
+private val ChatMessage.contactPhones: List<String>
+    get() = ((extra as? Map<*, *>)?.get("phones") as? List<*>)
+        ?.mapNotNull { it as? String }
+        ?: emptyList()
+
+// Extract email from extra payload
+private val ChatMessage.contactEmail: String?
+    get() = (extra as? Map<*, *>)?.get("email") as? String
+
+// Try to infer a human-readable file name
+private val ChatMessage.fileDisplayName: String?
+    get() {
+        // Prefer explicit text as filename if present
+        val fromText = text.takeIf { it.isNotBlank() && !it.startsWith("[") }
+        if (fromText != null) return fromText
+
+        val url = mediaUrl ?: return null
+        return try {
+            val afterSlash = url.substringAfterLast('/')
+            val beforeQuery = afterSlash.substringBefore('?')
+            Uri.decode(beforeQuery)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+// "32s" for audio if duration exists
+private val ChatMessage.voiceDurationLabel: String?
+    get() = audioDuration
+        ?.let { (it / 1000).toInt() }
+        ?.takeIf { it > 0 }
+        ?.let { "${it}s" }
 /* ─────────────────────────────
    Message bubble with media + reactions + special payloads
    ───────────────────────────── */
