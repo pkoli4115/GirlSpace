@@ -182,7 +182,8 @@ class ChatRepository(
         mediaType: String? = null,
         replyTo: String? = null,
         audioDuration: Long? = null,
-        mediaThumbnail: String? = null
+        mediaThumbnail: String? = null,
+        extra: Map<String, Any>? = null
     ) {
         val uid = currentUid()
         val name = currentName()
@@ -191,6 +192,9 @@ class ChatRepository(
         val msgDoc = messagesRef.document()
         val now = Timestamp.now()
 
+        // -------------------------------------------------
+        // Build base message payload
+        // -------------------------------------------------
         val msgData = mutableMapOf<String, Any?>(
             "id" to msgDoc.id,
             "threadId" to threadId,
@@ -207,23 +211,41 @@ class ChatRepository(
             "mediaThumbnail" to mediaThumbnail
         )
 
-        // Firestore ignores nulls if we filter them out
+        // -------------------------------------------------
+        // ⭐ ADD: extra map for CONTACT & LOCATION messages
+        // -------------------------------------------------
+        if (extra != null) {
+            msgData["extra"] = extra
+        }
+
+        // -------------------------------------------------
+        // Firestore cleans null values
+        // -------------------------------------------------
         val cleaned = msgData.filterValues { it != null }
 
         msgDoc.set(cleaned).await()
 
-        // Update thread summary
+        // -------------------------------------------------
+        // Update thread summary bubble (ChatsScreen preview)
+        // -------------------------------------------------
+        val preview: String = when (mediaType) {
+            "image" -> "[Image]"
+            "video" -> "[Video]"
+            "audio" -> "[Voice]"
+            "location" -> extra?.get("address")?.toString() ?: "[Location]"
+            "live_location" -> "Live Location"
+            "contact" -> extra?.get("name")?.toString() ?: "[Contact]"
+            else -> if (text.isNotBlank()) text else "[Message]"
+        }
+
         threadsRef.document(threadId).update(
             mapOf(
-                "lastMessage" to when {
-                    text.isNotBlank() -> text
-                    mediaType != null -> "[${mediaType}]"
-                    else -> "[Message]"
-                },
+                "lastMessage" to preview,
                 "lastTimestamp" to System.currentTimeMillis()
             )
         ).await()
     }
+
 
     // -------------------------------------------------------------------------
     // REACTIONS
@@ -280,9 +302,20 @@ class ChatRepository(
             val rawText = getString("text") ?: ""
             val deleted = rawText == "This message was deleted"
 
-// If deleted → null out media fields client-side, even if old DB had stale values
+            // If deleted → null out media fields client-side, even if old DB had stale values
             val finalMediaUrl = if (deleted) null else getString("mediaUrl")
             val finalMediaType = if (deleted) null else getString("mediaType")
+            val finalMediaThumb = if (deleted) null else getString("mediaThumbnail")
+            val finalAudioDuration = if (deleted) null else getLong("audioDuration")
+
+            // 🔹 Extra payload (location / contact / etc.)
+            @Suppress("UNCHECKED_CAST")
+            val extraPayload: Map<String, Any>? =
+                if (deleted) {
+                    null
+                } else {
+                    get("extra") as? Map<String, Any>
+                }
 
             ChatMessage(
                 id = getString("id") ?: "",
@@ -292,12 +325,13 @@ class ChatRepository(
                 text = rawText,
                 mediaUrl = finalMediaUrl,
                 mediaType = finalMediaType,
-                mediaThumbnail = if (deleted) null else getString("mediaThumbnail"),
-                audioDuration = if (deleted) null else getLong("audioDuration"),
+                mediaThumbnail = finalMediaThumb,
+                audioDuration = finalAudioDuration,
                 replyTo = getString("replyTo"),
                 createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
                 readBy = (get("readBy") as? List<String>) ?: emptyList(),
-                reactions = reactionsMap
+                reactions = reactionsMap,
+                extra = extraPayload          // ✅ this was missing
             )
 
         } catch (e: Exception) {

@@ -1,23 +1,27 @@
 package com.girlspace.app.ui.chat
 
 // GirlSpace – ChatScreenV2.kt
-// Version: v2.1.0 – Batch 7 functional wiring
+// Version: v2.2.0 – Batch 7 final fixes
 //
-// - Uses existing ChatViewModel v1.3.2 (no changes required).
-// - Adds: video recording, in-chat search, selection mode share,
-//   3-dots menu (info/report/block/add participants), attachment sheet,
-//   location/contact insert, add participants (max 5), improved header,
-//   quick-like separate from mic.
+// - Uses existing ChatViewModel v1.3.2+.
+// - Adds: WA-style selection bar, camera in bottom bar, real location/contact
+//   share, long-press reactions, system-keyboard emoji, bee sound on incoming
+//   messages, improved participants limit feedback.
+
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collectLatest
 import android.Manifest
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.Geocoder
+import android.location.LocationManager
 import android.media.MediaPlayer
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.widget.Toast
@@ -54,14 +58,17 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Call
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.Forward
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Reply
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.ThumbUp
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material3.AlertDialog
@@ -94,8 +101,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -114,20 +124,42 @@ import com.google.firebase.firestore.SetOptions
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
 
 // Local-only types (different names to avoid clashes with Old_ChatScreen.kt)
 private enum class V2PermissionType {
-    CAMERA, AUDIO, STORAGE
+    CAMERA,
+    AUDIO,
+    STORAGE,
+    LOCATION,
+    CONTACTS
 }
 
 private data class V2AttachedMedia(
     val uri: Uri,
     val type: String // image, video, audio, file
 )
+
+private data class V2LocationPayload(
+    val lat: Double,
+    val lng: Double,
+    val address: String,
+    val isLive: Boolean
+)
+
+private data class V2ContactPayload(
+    val name: String,
+    val phones: List<String>,
+    val email: String?
+)
+
+private const val LOCATION_PREFIX = "GS_LOCATION|"
+private const val CONTACT_PREFIX = "GS_CONTACT|"
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -161,6 +193,10 @@ fun ChatScreenV2(
         MediaPlayer.create(context, R.raw.reaction_bee)
     }
 
+    // track last message for bee sound
+    var initialMessagesHandled by remember { mutableStateOf(false) }
+    var lastSoundedMessageId by remember { mutableStateOf<String?>(null) }
+
     // Voice note recording
     var isRecording by remember { mutableStateOf(false) }
     var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
@@ -173,7 +209,6 @@ fun ChatScreenV2(
     var replyTo by remember { mutableStateOf<ChatMessage?>(null) }
     var messageForActions by remember { mutableStateOf<ChatMessage?>(null) }
 
-    var showComposerEmoji by remember { mutableStateOf(false) }
     var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }
 
     var highlightedMessageId by remember { mutableStateOf<String?>(null) }
@@ -184,6 +219,8 @@ fun ChatScreenV2(
     var pendingCameraAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingStorageAction by remember { mutableStateOf<(() -> Unit)?>(null) }
     var pendingAudioAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingLocationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var pendingContactAction by remember { mutableStateOf<(() -> Unit)?>(null) }
 
     var cameraImageUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -207,6 +244,7 @@ fun ChatScreenV2(
     var showAddParticipantsDialog by remember { mutableStateOf(false) }
     var reportReason by remember { mutableStateOf("") }
     var showAttachmentMenu by remember { mutableStateOf(false) }
+    var showLocationModeDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(threadId) {
         vm.ensureThreadSelected(threadId)
@@ -244,7 +282,7 @@ fun ChatScreenV2(
                 }
                 participantNames = nameMap
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // Ignore; we'll fall back to otherName
         }
     }
@@ -283,10 +321,29 @@ fun ChatScreenV2(
 
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val focusRequester = remember { FocusRequester() }
 
     // Auto-scroll to bottom for new messages if already near bottom
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
+            // Bee sound for new incoming messages
+            if (!initialMessagesHandled) {
+                initialMessagesHandled = true
+                lastSoundedMessageId = messages.last().id
+            } else {
+                val last = messages.last()
+                if (last.id != lastSoundedMessageId && last.senderId != currentUid) {
+                    try {
+                        if (reactionPlayer.isPlaying) {
+                            reactionPlayer.seekTo(0)
+                        }
+                        reactionPlayer.start()
+                    } catch (_: Exception) {
+                    }
+                    lastSoundedMessageId = last.id
+                }
+            }
+
             val lastVisibleIndex =
                 listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
             val total = listState.layoutInfo.totalItemsCount
@@ -309,7 +366,6 @@ fun ChatScreenV2(
                 }
             }
     }
-
 
     // Highlight timeout for "jump to original" and search matches
     LaunchedEffect(highlightedMessageId) {
@@ -411,6 +467,27 @@ fun ChatScreenV2(
         }
     }
 
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions.any { it.value }
+        if (granted) {
+            pendingLocationAction?.invoke()
+        } else {
+            showPermissionSettingsFor = V2PermissionType.LOCATION
+        }
+    }
+
+    val contactPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            pendingContactAction?.invoke()
+        } else {
+            showPermissionSettingsFor = V2PermissionType.CONTACTS
+        }
+    }
+
     fun hasStoragePermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val imgGranted = ContextCompat.checkSelfPermission(
@@ -473,6 +550,45 @@ fun ChatScreenV2(
         }
     }
 
+    fun hasLocationPermission(): Boolean {
+        val fine = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        return fine || coarse
+    }
+
+    fun requestLocationThen(action: () -> Unit) {
+        pendingLocationAction = action
+        if (hasLocationPermission()) {
+            action()
+        } else {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    fun requestContactsThen(action: () -> Unit) {
+        pendingContactAction = action
+        val status = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        )
+        if (status == PackageManager.PERMISSION_GRANTED) {
+            action()
+        } else {
+            contactPermissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
+
     // ───────────────────── Camera / gallery / files / video ─────────────────────
 
     val cameraLauncher = rememberLauncherForActivityResult(
@@ -526,6 +642,96 @@ fun ChatScreenV2(
         }
     }
 
+    val contactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickContact()
+    ) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val resolver = context.contentResolver
+
+            // SAFE INITIALIZATION (fix for your errors)
+            var contactId: String? = null
+            var displayName: String? = null
+            var phones: MutableList<String> = mutableListOf()
+            var email: String? = null
+
+            // ---------------------------------------------
+            // 1. READ CONTACT ID + DISPLAY NAME
+            // ---------------------------------------------
+            resolver.query(
+                uri,
+                arrayOf(
+                    ContactsContract.Contacts._ID,
+                    ContactsContract.Contacts.DISPLAY_NAME
+                ),
+                null,
+                null,
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    contactId = cursor.getString(
+                        cursor.getColumnIndexOrThrow(ContactsContract.Contacts._ID)
+                    )
+                    displayName = cursor.getString(
+                        cursor.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME)
+                    )
+                }
+            }
+
+            if (contactId == null) return@launch
+
+            // ---------------------------------------------
+            // 2. READ PHONE NUMBERS
+            // ---------------------------------------------
+            resolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
+                "${ContactsContract.CommonDataKinds.Phone.CONTACT_ID} = ?",
+                arrayOf(contactId),
+                null
+            )?.use { phoneCursor ->
+                while (phoneCursor.moveToNext()) {
+                    val num = phoneCursor.getString(
+                        phoneCursor.getColumnIndexOrThrow(
+                            ContactsContract.CommonDataKinds.Phone.NUMBER
+                        )
+                    )
+                    if (!num.isNullOrBlank()) {
+                        phones.add(num)
+                    }
+                }
+            }
+
+            // ---------------------------------------------
+            // 3. READ EMAIL(s)
+            // ---------------------------------------------
+            resolver.query(
+                ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+                arrayOf(ContactsContract.CommonDataKinds.Email.ADDRESS),
+                "${ContactsContract.CommonDataKinds.Email.CONTACT_ID} = ?",
+                arrayOf(contactId),
+                null
+            )?.use { emailCursor ->
+                if (emailCursor.moveToFirst()) {
+                    email = emailCursor.getString(
+                        emailCursor.getColumnIndexOrThrow(
+                            ContactsContract.CommonDataKinds.Email.ADDRESS
+                        )
+                    )
+                }
+            }
+
+            // ---------------------------------------------
+            // 4. SEND CONTACT MESSAGE (fixed VM function)
+            // ---------------------------------------------
+            vm.sendContactMessage(
+                name = displayName ?: "Contact",
+                phones = phones,
+                email = email
+            )
+        }
+    }
+
     fun openCamera() {
         try {
             val file = File(
@@ -549,7 +755,6 @@ fun ChatScreenV2(
     }
 
     fun openGallery() {
-        // For now, images mainly; media type detection still supports videos if picker allows.
         galleryLauncher.launch("image/*")
     }
 
@@ -567,6 +772,74 @@ fun ChatScreenV2(
                 "Unable to open video recorder",
                 Toast.LENGTH_SHORT
             ).show()
+        }
+    }
+
+    // ───────────────────── Location helpers ─────────────────────
+
+    fun sendLocation(isLive: Boolean) {
+        scope.launch {
+            try {
+                val lm = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                val provider = when {
+                    lm.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
+                    lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
+                    else -> null
+                }
+
+                if (provider == null) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            "Location services are turned off.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return@launch
+                }
+
+                @Suppress("MissingPermission")
+                val lastLocation = lm.getLastKnownLocation(provider)
+                if (lastLocation == null) {
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            "Unable to get current location.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    return@launch
+                }
+
+                val lat = lastLocation.latitude
+                val lng = lastLocation.longitude
+
+                val address = withContext(Dispatchers.IO) {
+                    try {
+                        val geocoder = Geocoder(context, Locale.getDefault())
+                        val result = geocoder.getFromLocation(lat, lng, 1)
+                        result?.firstOrNull()?.getAddressLine(0)
+                            ?: "${lat}, ${lng}"
+                    } catch (_: Exception) {
+                        "${lat}, ${lng}"
+                    }
+                }
+
+                vm.sendLocationMessage(
+                    lat = lat,
+                    lng = lng,
+                    address = address,
+                    isLive = isLive
+                )
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(
+                        context,
+                        "Failed to share location.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
         }
     }
 
@@ -628,9 +901,69 @@ fun ChatScreenV2(
         }
     }
 
-    // ───────────────────── Media open / audio play ─────────────────────
+// ───────────────────── Media open / audio play ─────────────────────
 
     fun openMessageMedia(message: ChatMessage) {
+        // 0) Handle shared contact → open dialer
+        if (message.mediaType == "contact") {
+            val phone = message.contactPrimaryPhone
+            if (!phone.isNullOrBlank()) {
+                val intent = Intent(Intent.ACTION_DIAL).apply {
+                    data = Uri.parse("tel:$phone")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(context, "No app found to handle dialer", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "No phone number in this contact", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // 1) Handle location specially → open Maps
+        if (message.mediaType == "location" || message.mediaType == "live_location") {
+            val lat = message.locationLat
+            val lng = message.locationLng
+            val address = message.locationAddress
+
+            if (lat != null && lng != null) {
+                val label = address ?: if (message.mediaType == "live_location") {
+                    "Live location"
+                } else {
+                    "Shared location"
+                }
+
+                val uri = Uri.parse("geo:$lat,$lng?q=$lat,$lng(${Uri.encode(label)})")
+                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+
+                try {
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(context, "No maps app found", Toast.LENGTH_SHORT).show()
+                }
+            } else if (!address.isNullOrBlank()) {
+                // Fallback: address only
+                val uri = Uri.parse("geo:0,0?q=${Uri.encode(address)}")
+                val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(context, "No maps app found", Toast.LENGTH_SHORT).show()
+                }
+            } else {
+                Toast.makeText(context, "Location data not available", Toast.LENGTH_SHORT).show()
+            }
+            return  // 🔴 don't fall through to file logic
+        }
+
+        // 2) Normal media: image/video/audio/files
         val url = message.mediaUrl ?: return
         val uri = Uri.parse(url)
 
@@ -657,7 +990,6 @@ fun ChatScreenV2(
             ).show()
         }
     }
-
     fun playOrPauseAudio(message: ChatMessage) {
         val url = message.mediaUrl ?: return
 
@@ -682,7 +1014,6 @@ fun ChatScreenV2(
             Toast.makeText(context, "Unable to play audio", Toast.LENGTH_SHORT).show()
         }
     }
-
     // ───────────────────── Search (within this chat) ─────────────────────
 
     fun recalcSearchMatches() {
@@ -862,17 +1193,26 @@ fun ChatScreenV2(
             } else {
                 SelectionTopBarV2(
                     count = selectedMessageIds.size,
-                    onClearSelection = { selectedMessageIds = emptySet() },
+                    onClearSelection = {
+                        selectedMessageIds = emptySet()
+                        vm.closeReactionPicker()
+                    },
                     onReply = {
                         // Reply to the first selected in chronological order
                         val msg = messages.firstOrNull { it.id in selectedMessageIds }
                         if (msg != null) {
                             replyTo = msg
                             selectedMessageIds = emptySet()
+                            vm.closeReactionPicker()
                         }
                     },
+                    onStar = {
+                        selectedMessageIds.forEach { id ->
+                            vm.reactToMessage(id, "⭐")
+                        }
+                        Toast.makeText(context, "Starred", Toast.LENGTH_SHORT).show()
+                    },
                     onDelete = {
-                        // Multi-delete: unsend mine, delete-for-me for others
                         if (selectedMessageIds.size == 1) {
                             val id = selectedMessageIds.first()
                             val msg = messages.firstOrNull { it.id == id }
@@ -898,10 +1238,29 @@ fun ChatScreenV2(
                             ).show()
                         }
                     },
-                    onShare = {
+                    onForward = {
                         val toShare = messages.filter { it.id in selectedMessageIds }
                         shareMessagesExternally(toShare)
                         selectedMessageIds = emptySet()
+                        vm.closeReactionPicker()
+                    },
+                    onMoreShare = {
+                        val toShare = messages.filter { it.id in selectedMessageIds }
+                        shareMessagesExternally(toShare)
+                        selectedMessageIds = emptySet()
+                        vm.closeReactionPicker()
+                    },
+                    onPin = {
+                        selectedMessageIds.forEach { id ->
+                            vm.reactToMessage(id, "📌")
+                        }
+                        Toast.makeText(context, "Pinned", Toast.LENGTH_SHORT).show()
+                    },
+                    onReport = {
+                        vm.reportChat("Reported selected messages.")
+                        Toast.makeText(context, "Report submitted", Toast.LENGTH_SHORT).show()
+                        selectedMessageIds = emptySet()
+                        vm.closeReactionPicker()
                     }
                 )
             }
@@ -964,7 +1323,7 @@ fun ChatScreenV2(
                             currentUserId = currentUid,
                             isSelected = isSelected,
                             isHighlighted = isHighlighted,
-                            showReactionStrip = (!mine && selectedMsgForReaction == msg.id),
+                            showReactionStrip = (selectedMsgForReaction == msg.id),
                             isPlayingAudio = (msg.id == currentlyPlayingId),
                             onClick = {
                                 if (selectedMessageIds.isNotEmpty()) {
@@ -972,15 +1331,22 @@ fun ChatScreenV2(
                                     selectedMessageIds =
                                         if (isSelected) selectedMessageIds - msg.id
                                         else selectedMessageIds + msg.id
-                                } else if (msg.mediaUrl != null) {
+                                } else if (
+                                    msg.mediaType == "location" ||
+                                    msg.mediaType == "live_location" ||
+                                    msg.mediaType == "contact" ||
+                                    msg.mediaUrl != null
+                                ) {
                                     openMessageMedia(msg)
                                 }
                             },
                             onLongPress = {
-                                // WA-style: long press enters selection mode
+                                // WA-style: long press enters selection AND opens reactions
                                 selectedMessageIds =
                                     if (isSelected) selectedMessageIds - msg.id
                                     else selectedMessageIds + msg.id
+
+                                vm.openReactionPicker(msg.id)
                             },
                             onReplyClick = {
                                 if (selectedMessageIds.isEmpty()) {
@@ -998,6 +1364,7 @@ fun ChatScreenV2(
                                 vm.openReactionPicker(msg.id)
                             }
                         )
+
                     }
                 }
 
@@ -1053,11 +1420,24 @@ fun ChatScreenV2(
                         .padding(horizontal = 8.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Emoji button
-                    IconButton(onClick = { showComposerEmoji = true }) {
+                    // Emoji button → focuses text field to open system keyboard (emoji/GIF tabs)
+                    IconButton(onClick = { focusRequester.requestFocus() }) {
                         Icon(
                             imageVector = Icons.Default.EmojiEmotions,
                             contentDescription = "Emojis",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    // Camera button (outside + menu)
+                    IconButton(
+                        onClick = {
+                            requestCameraThen { openCamera() }
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Videocam, // visually camera-like; you can swap if you have another icon
+                            contentDescription = "Camera",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
@@ -1076,7 +1456,8 @@ fun ChatScreenV2(
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 44.dp)
-                            .padding(horizontal = 4.dp),
+                            .padding(horizontal = 4.dp)
+                            .focusRequester(focusRequester),
                         value = inputText,
                         onValueChange = { vm.setInputText(it) },
                         placeholder = {
@@ -1097,7 +1478,7 @@ fun ChatScreenV2(
 
                     val canSend = inputText.isNotBlank() || attachedMedia.isNotEmpty()
 
-                    // Quick-like (thumbs-up) – separate from mic; does NOT start recording
+                    // Quick-like (thumbs-up)
                     if (!canSend && !isRecording) {
                         IconButton(
                             onClick = {
@@ -1211,17 +1592,6 @@ fun ChatScreenV2(
         }
     }
 
-    // Emoji picker (composer)
-    if (showComposerEmoji) {
-        ComposerEmojiPickerDialogV2(
-            onDismiss = { showComposerEmoji = false },
-            onEmojiSelected = { emoji ->
-                vm.setInputText(inputText + emoji)
-                showComposerEmoji = false
-            }
-        )
-    }
-
     // Emoji picker for message reactions (from ReactionBar +)
     if (reactionPickerMessageId != null) {
         ComposerEmojiPickerDialogV2(
@@ -1321,6 +1691,10 @@ fun ChatScreenV2(
                         "This app needs microphone permission to record voice messages."
                     V2PermissionType.STORAGE ->
                         "This app needs storage permission to pick photos, videos, and files."
+                    V2PermissionType.LOCATION ->
+                        "This app needs location permission to share your location in chat."
+                    V2PermissionType.CONTACTS ->
+                        "This app needs contacts permission to share contacts in chat."
                 }
                 Text(msg)
             }
@@ -1468,43 +1842,51 @@ fun ChatScreenV2(
                     TextButton(
                         onClick = {
                             showAttachmentMenu = false
-                            requestCameraThen { openCamera() }
-                        }
-                    ) { Text("Camera") }
-
-                    TextButton(
-                        onClick = {
-                            showAttachmentMenu = false
                             requestStorageThen { openFilePicker() }
                         }
-                    ) { Text("Document") }
+                    ) { Text("File") }
 
                     TextButton(
                         onClick = {
                             showAttachmentMenu = false
-                            // Insert simple location text into composer
-                            val base = inputText
-                            val extra = if (base.isBlank()) {
-                                "📍 Location shared via GirlSpace"
-                            } else {
-                                "$base\n📍 Location shared via GirlSpace"
-                            }
-                            vm.setInputText(extra)
+                            showLocationModeDialog = true
                         }
                     ) { Text("Location") }
 
                     TextButton(
                         onClick = {
                             showAttachmentMenu = false
-                            val base = inputText
-                            val extra = if (base.isBlank()) {
-                                "📇 Contact shared via GirlSpace"
-                            } else {
-                                "$base\n📇 Contact shared via GirlSpace"
+                            requestContactsThen {
+                                contactPickerLauncher.launch(null)
                             }
-                            vm.setInputText(extra)
                         }
                     ) { Text("Contact") }
+                }
+            }
+        )
+    }
+
+    // Location mode sheet
+    if (showLocationModeDialog) {
+        AlertDialog(
+            onDismissRequest = { showLocationModeDialog = false },
+            confirmButton = {},
+            title = { Text("Share location") },
+            text = {
+                Column {
+                    TextButton(
+                        onClick = {
+                            showLocationModeDialog = false
+                            requestLocationThen { sendLocation(isLive = false) }
+                        }
+                    ) { Text("Share current location") }
+
+                    TextButton(
+                        onClick = {
+                            showLocationModeDialog = false
+                            requestLocationThen { sendLocation(isLive = true) }
+                        }
+                    ) { Text("Share live location") }
                 }
             }
         )
@@ -1658,9 +2040,15 @@ private fun SelectionTopBarV2(
     count: Int,
     onClearSelection: () -> Unit,
     onReply: () -> Unit,
+    onStar: () -> Unit,
     onDelete: () -> Unit,
-    onShare: () -> Unit
+    onForward: () -> Unit,
+    onMoreShare: () -> Unit,
+    onPin: () -> Unit,
+    onReport: () -> Unit
 ) {
+    var showMenu by remember { mutableStateOf(false) }
+
     TopAppBar(
         title = {
             Text(
@@ -1679,20 +2067,59 @@ private fun SelectionTopBarV2(
         actions = {
             IconButton(onClick = onReply) {
                 Icon(
-                    imageVector = Icons.Default.Share, // visual reply not critical; could swap icon if you prefer
+                    imageVector = Icons.Default.Reply,
                     contentDescription = "Reply"
                 )
             }
-            IconButton(onClick = onShare) {
+            IconButton(onClick = onStar) {
                 Icon(
-                    imageVector = Icons.Default.Share,
-                    contentDescription = "Share"
+                    imageVector = Icons.Default.Star,
+                    contentDescription = "Star"
                 )
             }
             IconButton(onClick = onDelete) {
                 Icon(
-                    imageVector = Icons.Default.Call, // you may replace with Delete icon if already imported
+                    imageVector = Icons.Default.Delete,
                     contentDescription = "Delete"
+                )
+            }
+            IconButton(onClick = onForward) {
+                Icon(
+                    imageVector = Icons.Default.Forward,
+                    contentDescription = "Forward"
+                )
+            }
+            IconButton(onClick = { showMenu = true }) {
+                Icon(
+                    imageVector = Icons.Default.MoreVert,
+                    contentDescription = "More"
+                )
+            }
+
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Share") },
+                    onClick = {
+                        showMenu = false
+                        onMoreShare()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Pin") },
+                    onClick = {
+                        showMenu = false
+                        onPin()
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Report") },
+                    onClick = {
+                        showMenu = false
+                        onReport()
+                    }
                 )
             }
         },
@@ -1751,7 +2178,41 @@ private fun InChatSearchBarV2(
 }
 
 /* ─────────────────────────────
-   Message bubble with media + reactions
+   Helpers to parse special payloads
+   ───────────────────────────── */
+
+private fun ChatMessage.locationPayloadOrNull(): V2LocationPayload? {
+    val raw = text
+    if (!raw.startsWith(LOCATION_PREFIX)) return null
+    val body = raw.removePrefix(LOCATION_PREFIX)
+    val parts = body.split("|")
+    if (parts.size < 3) return null
+    val lat = parts[0].toDoubleOrNull() ?: return null
+    val lng = parts[1].toDoubleOrNull() ?: return null
+    val address = parts[2]
+    val isLive = parts.getOrNull(3) == "live"
+    return V2LocationPayload(lat, lng, address, isLive)
+}
+
+private fun ChatMessage.contactPayloadOrNull(): V2ContactPayload? {
+    val raw = text
+    if (!raw.startsWith(CONTACT_PREFIX)) return null
+    val body = raw.removePrefix(CONTACT_PREFIX)
+    val parts = body.split("|")
+    if (parts.size < 2) return null
+    val name = parts[0]
+    val phones = parts.getOrNull(1)
+        ?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+        ?: emptyList()
+    val email = parts.getOrNull(2)?.takeIf { it.isNotBlank() }
+    if (phones.isEmpty() && email == null) return null
+    return V2ContactPayload(name, phones, email)
+}
+
+/* ─────────────────────────────
+   Message bubble with media + reactions + special payloads
    ───────────────────────────── */
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1772,6 +2233,8 @@ private fun ChatMessageBubbleV2(
     onReactionSelected: (String) -> Unit,
     onMoreReactions: () -> Unit
 ) {
+    val context = LocalContext.current
+
     val senderName = message.senderName.ifBlank { "GirlSpace user" }
     val sdf = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeText = remember(message.createdAt) {
@@ -1796,6 +2259,15 @@ private fun ChatMessageBubbleV2(
         isSelected -> baseColor.copy(alpha = 0.5f)
         isHighlighted -> baseColor.copy(alpha = 0.8f)
         else -> baseColor
+    }
+
+    val locationPayload = remember(message.text, message.mediaType) {
+        if (message.mediaType == "location") message.locationPayloadOrNull()
+        else null
+    }
+    val contactPayload = remember(message.text, message.mediaType) {
+        if (message.mediaType == "contact") message.contactPayloadOrNull()
+        else null
     }
 
     Row(
@@ -1841,8 +2313,109 @@ private fun ChatMessageBubbleV2(
                     )
                 }
 
+                // SPECIAL: Location
+                if (message.mediaType == "location" || message.mediaType == "live_location") {
+
+                    val address = message.locationAddress ?: message.text
+                    val isLive = message.isLiveLocation
+
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (mine)
+                                    Color.White.copy(alpha = 0.15f)
+                                else
+                                    MaterialTheme.colorScheme.surface
+                            )
+                            // Let outer logic handle opening Maps via openMessageMedia()
+                            .clickable { onMediaClick() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (isLive) "Live location" else "Location",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
+                        if (!address.isNullOrBlank()) {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = address,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (mine)
+                                    Color.White.copy(alpha = 0.9f)
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "View on map",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (mine) Color.White else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+// SPECIAL: Contact
+                else if (message.mediaType == "contact") {
+
+                    val name = message.contactName ?: "Contact"
+                    val phone = message.contactPrimaryPhone
+                    val email = message.contactEmail
+
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                if (mine)
+                                    Color.White.copy(alpha = 0.15f)
+                                else
+                                    MaterialTheme.colorScheme.surface
+                            )
+                            // Let outer logic handle opening dialer via openMessageMedia()
+                            .clickable { onMediaClick() }
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = name,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
+                        phone?.let {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (mine)
+                                    Color.White.copy(alpha = 0.9f)
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        email?.let {
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = it,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (mine)
+                                    Color.White.copy(alpha = 0.9f)
+                                else
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Tap to call",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (mine) Color.White else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+
                 // MEDIA
-                if (message.mediaUrl != null && message.mediaType != null) {
+                else if (message.mediaUrl != null && message.mediaType != null) {
                     when (message.mediaType) {
                         "image" -> {
                             AsyncImage(
@@ -1852,7 +2425,6 @@ private fun ChatMessageBubbleV2(
                                     .widthIn(max = 220.dp)
                                     .height(220.dp)
                                     .clip(RoundedCornerShape(12.dp))
-                                    .clickable { onMediaClick() }
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                         }
@@ -1862,7 +2434,6 @@ private fun ChatMessageBubbleV2(
                                 text = "▶ Video",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.clickable { onMediaClick() }
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                         }
@@ -1937,21 +2508,26 @@ private fun ChatMessageBubbleV2(
                     }
                 }
 
-                // TEXT & DELETED MESSAGE HANDLING
+                // TEXT & DELETED MESSAGE HANDLING (skip for special payloads)
                 val body = message.text
-                if (body == "This message was deleted") {
-                    Text(
-                        text = "This message was deleted",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color.Gray,
-                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                    )
-                } else if (body.isNotBlank()) {
-                    Text(
-                        text = body,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
-                    )
+                if (locationPayload == null && contactPayload == null) {
+                    if (body == "This message was deleted") {
+                        Text(
+                            text = "This message was deleted",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color.Gray,
+                            fontStyle = FontStyle.Italic
+                        )
+                    } else if (body.isNotBlank() &&
+                        !body.startsWith(LOCATION_PREFIX) &&
+                        !body.startsWith(CONTACT_PREFIX)
+                    ) {
+                        Text(
+                            text = body,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
+                        )
+                    }
                 }
 
                 // Time + ticks
@@ -2100,7 +2676,7 @@ private fun AttachmentPreviewRowV2(
 }
 
 /* ─────────────────────────────
-   Emoji picker dialog (composer)
+   Emoji picker dialog (for reactions +)
    ───────────────────────────── */
 
 @Composable
@@ -2109,12 +2685,12 @@ private fun ComposerEmojiPickerDialogV2(
     onEmojiSelected: (String) -> Unit
 ) {
     val allEmojis = listOf(
-        "😀","😁","😂","🤣","😃","😄","😅","😆",
-        "😉","😊","🥰","😍","🤩","😘","😗","😙",
-        "😚","🙂","🤗","🤔","😐","😑","🙄","😏",
-        "😣","😥","😮","🤤","😪","😫","😭","😤",
-        "😡","😠","🤬","🤯","😳","🥵","🥶","😎",
-        "🤓","😇","🥳","🤠","😴","🤢","🤮","🤧"
+        "😀", "😁", "😂", "🤣", "😃", "😄", "😅", "😆",
+        "😉", "😊", "🥰", "😍", "🤩", "😘", "😗", "😙",
+        "😚", "🙂", "🤗", "🤔", "😐", "😑", "🙄", "😏",
+        "😣", "😥", "😮", "🤤", "😪", "😫", "😭", "😤",
+        "😡", "😠", "🤬", "🤯", "😳", "🥵", "🥶", "😎",
+        "🤓", "😇", "🥳", "🤠", "😴", "🤢", "🤮", "🤧"
     )
 
     AlertDialog(
@@ -2124,7 +2700,7 @@ private fun ComposerEmojiPickerDialogV2(
         text = {
             Column {
                 Text(
-                    text = "Tap an emoji to insert into your message",
+                    text = "Tap an emoji to react",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(modifier = Modifier.height(12.dp))
@@ -2152,7 +2728,6 @@ private fun ComposerEmojiPickerDialogV2(
         }
     )
 }
-
 /* ─────────────────────────────
    Add participants dialog
    ───────────────────────────── */
@@ -2167,11 +2742,28 @@ private fun AddParticipantsDialogV2(
 ) {
     val scrollState = rememberScrollState()
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    val context = LocalContext.current
 
     AlertDialog(
         onDismissRequest = onDismiss,
         confirmButton = {
-            TextButton(onClick = { onConfirm(selected) }) {
+            TextButton(
+                onClick = {
+                    // Safety check – never exceed limit
+                    val total = existingIds.size + selected.size
+                    if (total <= maxParticipants) {
+                        onConfirm(selected)
+                    } else {
+                        Toast
+                            .makeText(
+                                context,
+                                "Maximum $maxParticipants participants allowed in a group.",
+                                Toast.LENGTH_SHORT
+                            )
+                            .show()
+                    }
+                }
+            ) {
                 Text("Add")
             }
         },
@@ -2189,17 +2781,28 @@ private fun AddParticipantsDialogV2(
                 } else {
                     candidates.forEach { user ->
                         val checked = selected.contains(user.uid)
+
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clickable {
-                                    selected = if (checked) {
-                                        selected - user.uid
+                                    if (checked) {
+                                        // Unselect
+                                        selected = selected - user.uid
                                     } else {
-                                        if (existingIds.size + selected.size < maxParticipants) {
-                                            selected + user.uid
+                                        val total = existingIds.size + selected.size
+                                        if (total < maxParticipants) {
+                                            // Select new user
+                                            selected = selected + user.uid
                                         } else {
-                                            selected
+                                            // Hit the limit → show Toast
+                                            Toast
+                                                .makeText(
+                                                    context,
+                                                    "You can only have up to $maxParticipants participants in this group.",
+                                                    Toast.LENGTH_SHORT
+                                                )
+                                                .show()
                                         }
                                     }
                                 }
@@ -2209,15 +2812,25 @@ private fun AddParticipantsDialogV2(
                             Checkbox(
                                 checked = checked,
                                 onCheckedChange = { isChecked ->
-                                    selected = if (isChecked) {
-                                        if (existingIds.size + selected.size < maxParticipants) {
-                                            selected + user.uid
-                                        } else selected
+                                    if (isChecked) {
+                                        val total = existingIds.size + selected.size
+                                        if (total < maxParticipants) {
+                                            selected = selected + user.uid
+                                        } else {
+                                            Toast
+                                                .makeText(
+                                                    context,
+                                                    "You can only have up to $maxParticipants participants in this group.",
+                                                    Toast.LENGTH_SHORT
+                                                )
+                                                .show()
+                                        }
                                     } else {
-                                        selected - user.uid
+                                        selected = selected - user.uid
                                     }
                                 }
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = user.displayName,
                                 style = MaterialTheme.typography.bodyMedium

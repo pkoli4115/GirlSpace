@@ -1023,6 +1023,73 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+    // -------------------------------------------------------------
+// SEND CONTACT MESSAGE
+// -------------------------------------------------------------
+    fun sendContactMessage(
+        name: String,
+        phones: List<String>,
+        email: String?
+    ) {
+        val thread = _selectedThread.value ?: return
+
+        viewModelScope.launch {
+            try {
+                val contactMap = mapOf(
+                    "name" to name,
+                    "phones" to phones,
+                    "email" to email
+                ).filterValues { it != null } as Map<String, Any>
+
+                repo.sendMessage(
+                    threadId = thread.id,
+                    text = "",
+                    mediaType = "contact",
+                    mediaUrl = null,
+                    extra = contactMap
+                )
+
+                markUserActive()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message ?: "Failed to send contact"
+            }
+        }
+    }
+
+    // -------------------------------------------------------------
+// SEND LOCATION MESSAGE
+// -------------------------------------------------------------
+    fun sendLocationMessage(
+        lat: Double,
+        lng: Double,
+        address: String,
+        isLive: Boolean
+    ) {
+        val thread = _selectedThread.value ?: return
+
+        viewModelScope.launch {
+            try {
+                val payload = mapOf(
+                    "lat" to lat,
+                    "lng" to lng,
+                    "address" to address,
+                    "isLive" to isLive
+                )
+
+                repo.sendMessage(
+                    threadId = thread.id,
+                    text = if (isLive) "Live Location" else address,
+                    mediaType = if (isLive) "live_location" else "location",
+                    mediaUrl = null,
+                    extra = payload
+                )
+
+                markUserActive()
+            } catch (e: Exception) {
+                _errorMessage.value = e.message ?: "Failed to send location"
+            }
+        }
+    }
 
     // -------------------------------------------------------------
     // REACTIONS

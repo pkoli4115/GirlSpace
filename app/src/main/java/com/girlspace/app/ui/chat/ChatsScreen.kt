@@ -1,5 +1,6 @@
 package com.girlspace.app.ui.chat
 
+import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -56,10 +57,12 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.girlspace.app.data.chat.ChatThread
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.tasks.await
 
 // Simple user summary used by both ChatsScreen + ChatViewModel
 data class ChatUserSummary(
@@ -164,7 +167,7 @@ fun ChatsScreen(
         }
     }
 
-    // Presence map for threads list
+    // Presence map for threads list (1-1 online dot)
     val presenceMap: Map<String, Boolean> = remember(friends, suggestions) {
         (friends + suggestions).associate { it.uid to it.isOnline }
     }
@@ -389,7 +392,10 @@ private fun ChatUserAvatar(
 }
 
 /**
- * Single chat thread row in main list.
+ * Single chat thread row (1-1 + group support).
+ *
+ * - 1-1: single avatar + online dot + last message
+ * - Group: stacked avatars + “You, A, B +N” + “X online • last message”
  */
 @Composable
 private fun ChatThreadRow(
@@ -398,7 +404,84 @@ private fun ChatThreadRow(
     isOnline: Boolean,
     onClick: () -> Unit
 ) {
-    val displayName = thread.otherUserName(myId)
+    val firestore = remember { FirebaseFirestore.getInstance() }
+
+    var title by remember(thread.id) { mutableStateOf(thread.otherUserName(myId)) }
+    var isGroup by remember(thread.id) { mutableStateOf(false) }
+    var groupOnlineCount by remember(thread.id) { mutableStateOf(0) }
+    var avatarUrls by remember(thread.id) { mutableStateOf<List<String>>(emptyList()) }
+
+    // Load participants, names, avatars, and presence for groups
+    LaunchedEffect(thread.id) {
+        try {
+            val doc = firestore.collection("chatThreads")
+                .document(thread.id)
+                .get()
+                .await()
+
+            val participants =
+                (doc.get("participants") as? List<*>)?.filterIsInstance<String>()
+                    ?: listOfNotNull(thread.userA, thread.userB).distinct()
+
+            isGroup = participants.size > 2
+
+            if (!isGroup) {
+                // 1-1 chat → keep legacy logic
+                title = thread.otherUserName(myId)
+                return@LaunchedEffect
+            }
+
+            val names = mutableListOf<String>()
+            val avatars = mutableListOf<String>()
+            var onlineCount = 0
+
+            for (uid in participants) {
+                // Load user profile
+                val userDoc = firestore.collection("users")
+                    .document(uid)
+                    .get()
+                    .await()
+
+                if (userDoc.exists()) {
+                    val displayName = userDoc.getString("displayName")
+                        ?: userDoc.getString("name")
+                        ?: userDoc.getString("fullName")
+                        ?: userDoc.getString("username")
+                        ?: "GirlSpace user"
+
+                    names += if (uid == myId) "You" else displayName
+
+                    val avatar = userDoc.getString("photoUrl")
+                    if (!avatar.isNullOrBlank()) {
+                        avatars += avatar
+                    }
+                }
+
+                // Load presence
+                val statusDoc = firestore.collection("user_status")
+                    .document(uid)
+                    .get()
+                    .await()
+
+                val online = statusDoc.getBoolean("online") ?: false
+                if (online) onlineCount++
+            }
+
+            avatarUrls = avatars
+
+            title = when {
+                names.size <= 3 -> names.joinToString(", ")
+                else -> "${names.take(3).joinToString(", ")} +${names.size - 3}"
+            }
+
+            groupOnlineCount = onlineCount
+        } catch (e: Exception) {
+            Log.e("ChatThreadRow", "Failed to load group info", e)
+            isGroup = false
+            title = thread.otherUserName(myId)
+        }
+    }
+
     val lastMessage = thread.lastMessage.ifBlank { "Say hi 👋" }
 
     val timeText =
@@ -406,6 +489,12 @@ private fun ChatThreadRow(
             val df = SimpleDateFormat("HH:mm", Locale.getDefault())
             df.format(Date(thread.lastTimestamp))
         } else ""
+
+    val subtitle = if (isGroup && groupOnlineCount > 0) {
+        "$groupOnlineCount online • $lastMessage"
+    } else {
+        lastMessage
+    }
 
     Row(
         modifier = Modifier
@@ -415,35 +504,39 @@ private fun ChatThreadRow(
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // avatar with online/offline dot
-        Box(
-            modifier = Modifier
-                .size(40.dp),
-            contentAlignment = Alignment.Center
-        ) {
+        // Avatar: 1-1 uses old avatar+dot, group uses stacked avatars
+        if (isGroup) {
+            GroupAvatarStack(avatarUrls)
+        } else {
+            // avatar with online/offline dot (legacy behavior)
             Box(
-                modifier = Modifier
-                    .matchParentSize()
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                modifier = Modifier.size(40.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = displayName.firstOrNull()?.uppercase() ?: "G",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = title.firstOrNull()?.uppercase() ?: "G",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .size(9.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (isOnline) Color(0xFF4CAF50) else Color(0xFFB0BEC5)
+                        )
                 )
             }
-
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .size(9.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (isOnline) Color(0xFF4CAF50) else Color(0xFFB0BEC5)
-                    )
-            )
         }
 
         Spacer(modifier = Modifier.width(10.dp))
@@ -452,7 +545,7 @@ private fun ChatThreadRow(
             modifier = Modifier.weight(1f)
         ) {
             Text(
-                text = displayName,
+                text = title,
                 style = MaterialTheme.typography.bodyMedium.copy(
                     fontWeight = FontWeight.SemiBold
                 ),
@@ -460,7 +553,7 @@ private fun ChatThreadRow(
                 overflow = TextOverflow.Ellipsis
             )
             Text(
-                text = lastMessage,
+                text = subtitle,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -495,6 +588,60 @@ private fun ChatThreadRow(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Group avatar stack: up to 2 photos + "+N"
+ */
+@Composable
+private fun GroupAvatarStack(urls: List<String>) {
+    Box(modifier = Modifier.size(40.dp)) {
+        val first = urls.getOrNull(0)
+        val second = urls.getOrNull(1)
+        val extra = (urls.size - 2).coerceAtLeast(0)
+
+        if (first != null) {
+            AsyncImage(
+                model = first,
+                contentDescription = "Group avatar 1",
+                modifier = Modifier
+                    .size(26.dp)
+                    .align(Alignment.TopStart)
+                    .clip(CircleShape),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+        }
+
+        if (second != null) {
+            AsyncImage(
+                model = second,
+                contentDescription = "Group avatar 2",
+                modifier = Modifier
+                    .size(26.dp)
+                    .align(Alignment.BottomEnd)
+                    .clip(CircleShape),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+            )
+        }
+
+        if (extra > 0) {
+            Box(
+                modifier = Modifier
+                    .size(20.dp)
+                    .align(Alignment.CenterEnd)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "+$extra",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
             }
         }
     }

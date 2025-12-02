@@ -4,6 +4,26 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+
+    plugins {
+        // Android Gradle Plugin
+        id("com.android.application") version "8.2.2"
+
+        // Kotlin plugin matching Compose compiler
+        id("org.jetbrains.kotlin.android") version "1.9.24"
+
+        // Hilt DI plugin
+        id("com.google.dagger.hilt.android") version "2.52"
+
+        // Firebase / Google services plugin
+        id("com.google.gms.google-services") version "4.4.2"
+
+        // Optional: Crashlytics (add only if needed in app-level build.gradle)
+        // id("com.google.firebase.crashlytics") version "3.0.2"
+
+        // Optional: Maps secrets plugin (only if needed)
+        // id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin") version "2.0.1"
+    }
 }
 
 dependencyResolutionManagement {
@@ -15,4 +35,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "GirlSpace"
-include ':app'
+include(":app")

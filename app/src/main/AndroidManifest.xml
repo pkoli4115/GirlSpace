@@ -2,14 +2,18 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.girlspace.app">
 
-    <!-- Internet -->
+    <!-- ─────────────────────────────────────────────────────
+         Network + Notifications
+    ──────────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Notifications (Android 13+) -->
+    <!-- Android 13+ notification permission -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Gallery + files (Android 13+) -->
+    <!-- ─────────────────────────────────────────────────────
+         Media Permissions (Android 13+)
+    ──────────────────────────────────────────────────────── -->
     <uses-permission
         android:name="android.permission.READ_MEDIA_IMAGES"
         android:required="false" />
@@ -25,19 +29,31 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Camera + Audio -->
+    <!-- ─────────────────────────────────────────────────────
+         Camera + Audio for Chat attachments
+    ──────────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
-    <!-- Location (Play Store requires both coarse + fine) -->
+    <!-- Play-Store safe (do NOT require camera hardware) -->
+    <uses-feature
+        android:name="android.hardware.camera.any"
+        android:required="false" />
+
+    <!-- ─────────────────────────────────────────────────────
+         Location (Current + Live Location Sharing)
+    ──────────────────────────────────────────────────────── -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Camera hardware declaration to avoid warnings -->
-    <uses-feature
-        android:name="android.hardware.camera"
-        android:required="false" />
+    <!-- ─────────────────────────────────────────────────────
+         Contacts (for Contact Sharing)
+    ──────────────────────────────────────────────────────── -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
 
+    <!-- ─────────────────────────────────────────────────────
+         Application
+    ──────────────────────────────────────────────────────── -->
     <application
         android:name=".GirlSpaceApp"
         android:allowBackup="true"
@@ -47,7 +63,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.GirlSpace">
 
-        <!-- Facebook config -->
+        <!-- Facebook SDK -->
         <meta-data
             android:name="com.facebook.sdk.ApplicationId"
             android:value="@string/facebook_app_id" />
@@ -56,7 +72,7 @@
             android:name="com.facebook.sdk.ClientToken"
             android:value="@string/facebook_client_token" />
 
-        <!-- FileProvider for camera capture -->
+        <!-- FileProvider for camera/photo attachments -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="com.girlspace.app.fileprovider"
@@ -67,18 +83,28 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- Main Activity (Compose app entry) -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:windowSoftInputMode="adjustResize">
-
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.GirlSpace">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- Add your FirebaseMessagingService, other screens, etc -->
+        <!-- Optional: Firebase Messaging Service -->
+        <!--
+        <service
+            android:name=".notifications.GirlSpaceFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+        -->
 
     </application>
 

@@ -1,11 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Single app theme used by AndroidManifest -->
-    <style name="Theme.GirlSpace" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- For now, use defaults from Material3; we will customize later. -->
-        <item name="android:statusBarColor" tools:targetApi="l">
-            @android:color/transparent
-        </item>
+    <!-- App theme: Material 3, DayNight, No ActionBar -->
+    <style name="Theme.GirlSpace" parent="Theme.Material3.DayNight">
+
+        <!-- Remove Action Bar -->
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+
+        <!-- Compose transparent system bars -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+
+        <!-- Required for full Compose experience -->
+        <item name="android:windowFullscreen">false</item>
+
+        <!-- Remove edge glow overscroll -->
+        <item name="android:overScrollMode">never</item>
+
     </style>
 
 </resources>
