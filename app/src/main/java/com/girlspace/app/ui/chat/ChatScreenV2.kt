@@ -8,8 +8,10 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
-import android.util.Log
 
+import androidx.compose.material.icons.filled.Close
+import android.util.Log
+import androidx.compose.material.icons.filled.PushPin
 import android.content.ClipData
 import com.google.firebase.storage.storage
 import androidx.compose.material.icons.filled.StarBorder
@@ -179,6 +181,7 @@ fun ChatScreenV2(
     vm: ChatViewModel = viewModel()
 ) {
     val messages by vm.messages.collectAsState()
+    val pinnedMessages by vm.pinnedMessages.collectAsState()
     val selectedThread by vm.selectedThread.collectAsState()
     val inputText by vm.inputText.collectAsState()
     val isTyping by vm.isTyping.collectAsState()
@@ -1488,11 +1491,18 @@ fun ChatScreenV2(
                     },
 
                     onPin = {
+                        // Persist real pinned messages for this thread
                         selectedMessageIds.forEach { id ->
-                            vm.reactToMessage(id, "📌")
+                            vm.pinMessage(id)
                         }
+
                         Toast.makeText(context, "Pinned", Toast.LENGTH_SHORT).show()
+
+                        // Clear selection + close reactions
+                        selectedMessageIds = emptySet()
+                        vm.closeReactionPicker()
                     },
+
                     onReport = {
                         vm.reportChat("Reported selected messages.")
                         Toast.makeText(context, "Report submitted", Toast.LENGTH_SHORT).show()
@@ -1542,6 +1552,17 @@ fun ChatScreenV2(
                 }
 
                 // Messages list
+                PinnedMessagesBar(
+                    pinnedMessages = pinnedMessages,
+                    onClickPinned = { msg ->
+                        // jump to original message
+                        vm.requestScrollTo(msg.id)
+                    },
+                    onUnpin = { msg ->
+                        vm.unpinMessage(msg.id)
+                    }
+                )
+
                 LazyColumn(
                     modifier = Modifier
                         .weight(1f)
@@ -2764,6 +2785,61 @@ private fun AttachmentPreviewRowV2(
                     modifier = Modifier.clickable { onRemove(item) }
                 )
             }
+        }
+    }
+}
+@Composable
+private fun PinnedMessagesBar(
+    pinnedMessages: List<ChatMessage>,
+    onClickPinned: (ChatMessage) -> Unit,
+    onUnpin: (ChatMessage) -> Unit
+) {
+    if (pinnedMessages.isEmpty()) return
+
+    val msg = pinnedMessages.last()
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable { onClickPinned(msg) }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.PushPin,
+            contentDescription = "Pinned",
+            modifier = Modifier
+                .size(20.dp)
+                .padding(end = 8.dp)
+        )
+
+        Column(
+            modifier = Modifier.weight(1f)
+        ) {
+            val preview = when {
+                !msg.text.isNullOrBlank() -> msg.text!!
+                msg.mediaType == "image" -> "📷 Photo"
+                msg.mediaType == "video" -> "🎥 Video"
+                msg.mediaType == "audio" -> "🎧 Voice note"
+                msg.mediaType == "file"  -> "📎 File"
+                else -> "Message"
+            }
+
+            Text(
+                text = preview,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        IconButton(onClick = { onUnpin(msg) }) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "Unpin",
+                modifier = Modifier.size(18.dp)
+            )
         }
     }
 }

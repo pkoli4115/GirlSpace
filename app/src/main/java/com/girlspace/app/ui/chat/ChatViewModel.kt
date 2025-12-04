@@ -2,11 +2,13 @@ package com.girlspace.app.ui.chat
 
 // GirlSpace – ChatViewModel.kt
 // Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 
 import com.google.firebase.firestore.FieldValue
 import java.io.File
 import android.provider.OpenableColumns
-
+import kotlinx.coroutines.flow.SharingStarted
 import android.content.Context
 import android.net.Uri
 import android.util.Log
@@ -23,6 +25,8 @@ import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
@@ -43,6 +47,9 @@ class ChatViewModel : ViewModel() {
     private var msgListener: ListenerRegistration? = null
     private var typingListener: ListenerRegistration? = null
     private var presenceListener: ListenerRegistration? = null
+    // Listeners for pinned messages & blocked users
+    private var pinnedListener: ListenerRegistration? = null
+    private var blockedListener: ListenerRegistration? = null
 
     // Threads
     private val _threads = MutableStateFlow<List<ChatThread>>(emptyList())
@@ -64,6 +71,40 @@ class ChatViewModel : ViewModel() {
     private val _allMessages = MutableStateFlow<List<ChatMessage>>(emptyList())
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     val messages: StateFlow<List<ChatMessage>> = _messages
+    // --- PINNED MESSAGES STATE ---
+    private val _pinnedIds = MutableStateFlow<List<String>>(emptyList())
+    val pinnedIds: StateFlow<List<String>> = _pinnedIds
+
+    val pinnedMessages: StateFlow<List<ChatMessage>> =
+        combine(
+            messages,          // StateFlow<List<ChatMessage>>
+            _pinnedIds         // StateFlow<List<String>>
+        ) { allMessages: List<ChatMessage>, ids: List<String> ->
+            allMessages.filter { msg -> ids.contains(msg.id) }
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = emptyList()
+        )
+
+    // --- BLOCKED USERS STATE ---
+    private val _blockedUsers = MutableStateFlow<List<String>>(emptyList())
+    val blockedUsers: StateFlow<List<String>> = _blockedUsers
+
+    // Other participant in this chat – adapt to your own source
+    private val _otherUserId = MutableStateFlow<String?>(null)
+    val otherUserId: StateFlow<String?> = _otherUserId
+
+    val isBlockedThisChat: StateFlow<Boolean> = combine(
+        _blockedUsers,
+        _otherUserId
+    ) { blocked, otherId ->
+        otherId != null && blocked.contains(otherId)
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    // --- EMOJI PANEL STATE FOR COMPOSER ---
+    private val _showComposerEmoji = MutableStateFlow(false)
+    val showComposerEmoji: StateFlow<Boolean> = _showComposerEmoji
 
     private var loadedMessageCount: Int = 30
     private val pageSize: Int = 30
@@ -579,6 +620,10 @@ class ChatViewModel : ViewModel() {
             else -> thread.userAName
         }
         _otherUserName.value = otherName
+        _otherUserId.value = otherUid   // 👈 NEW: needed for block list
+
+        // 👇 NEW: start pinned + blocked listeners for this thread
+        startPinnedAndBlockedListeners(thread.id)
 
         // typing listener
         typingListener?.remove()
@@ -664,6 +709,29 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             markUserActive()
         }
+    }
+    private fun startPinnedAndBlockedListeners(threadId: String) {
+        val uid = auth.currentUser?.uid ?: return
+
+        // Listen for pinned message ids on chatThreads/{threadId}
+        pinnedListener?.remove()
+        pinnedListener = firestore.collection("chatThreads")
+            .document(threadId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                val pinned = (snapshot.get("pinnedMessageIds") as? List<String>).orEmpty()
+                _pinnedIds.value = pinned
+            }
+
+        // Listen for this user's blocked list on users/{uid}
+        blockedListener?.remove()
+        blockedListener = firestore.collection("users")
+            .document(uid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
+                val blocked = (snapshot.get("blockedUsers") as? List<String>).orEmpty()
+                _blockedUsers.value = blocked
+            }
     }
 
     // Pagination: load older messages
@@ -1099,6 +1167,7 @@ class ChatViewModel : ViewModel() {
     }
 
     // -------------------------------------------------------------
+    // -------------------------------------------------------------
     // REACTIONS
     // -------------------------------------------------------------
     fun openReactionPicker(messageId: String) {
@@ -1126,18 +1195,70 @@ class ChatViewModel : ViewModel() {
     }
 
     // -------------------------------------------------------------
+    // PIN / UNPIN
+    // -------------------------------------------------------------
+    fun pinMessage(messageId: String) {
+        val thread = _selectedThread.value ?: return
+
+        viewModelScope.launch {
+            try {
+                val threadRef = firestore.collection("chatThreads")
+                    .document(thread.id)
+
+                firestore.runTransaction { tx ->
+                    val snap = tx.get(threadRef)
+                    val current = (snap.get("pinnedMessageIds") as? List<String>)
+                        .orEmpty()
+                        .toMutableList()
+
+                    if (!current.contains(messageId)) {
+                        current.add(messageId)
+                    }
+
+                    tx.update(threadRef, "pinnedMessageIds", current)
+                }.await()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "pinMessage failed", e)
+            }
+        }
+    }
+
+    fun unpinMessage(messageId: String) {
+        val thread = _selectedThread.value ?: return
+
+        viewModelScope.launch {
+            try {
+                val threadRef = firestore.collection("chatThreads")
+                    .document(thread.id)
+
+                firestore.runTransaction { tx ->
+                    val snap = tx.get(threadRef)
+                    val current = (snap.get("pinnedMessageIds") as? List<String>)
+                        .orEmpty()
+                        .toMutableList()
+
+                    current.remove(messageId)
+
+                    tx.update(threadRef, "pinnedMessageIds", current)
+                }.await()
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "unpinMessage failed", e)
+            }
+        }
+    }
+    // -------------------------------------------------------------
     // DELETE / UNSEND
     // -------------------------------------------------------------
-
     /**
-     * Delete for me:
+     * Delete for me (local only):
      * - Do NOT touch Firestore.
-     * - Just hide this message locally using _locallyDeletedIds.
+     * - Just hide this message on this device via _locallyDeletedIds.
      */
     fun deleteMessageForMe(messageId: String) {
+        // Mark this message as locally deleted
         _locallyDeletedIds.value = _locallyDeletedIds.value + messageId
 
-        // apply filter immediately
+        // Rebuild the visible slice and exclude locally deleted ids
         val slice = _allMessages.value.takeLast(loadedMessageCount)
         val deleted = _locallyDeletedIds.value
         _messages.value = slice.filter { it.id !in deleted }
@@ -1149,6 +1270,7 @@ class ChatViewModel : ViewModel() {
      * - Try deleting the media file from Storage (if any).
      * - ALSO update local _allMessages/_messages immediately so UI changes instantly.
      */
+
     fun unsendMessage(messageId: String) {
         val threadId = _selectedThread.value?.id ?: return
 
