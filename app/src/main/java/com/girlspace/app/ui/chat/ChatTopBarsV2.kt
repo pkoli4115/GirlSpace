@@ -20,7 +20,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -39,6 +38,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.filled.Videocam
 
+// ─────────────────────────────────────────────────────────────
+// NORMAL CHAT TOP BAR (Search + Share moved to overflow menu)
+// ─────────────────────────────────────────────────────────────
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatTopBarV2(
@@ -107,13 +109,7 @@ fun ChatTopBarV2(
             }
         },
         actions = {
-            IconButton(onClick = onSearchClick) {
-                Icon(
-                    imageVector = Icons.Default.Search,
-                    contentDescription = "Search",
-                    tint = iconColor
-                )
-            }
+            // 🔹 KEEP video icon (as requested)
             IconButton(onClick = onVideoClick) {
                 Icon(
                     imageVector = Icons.Default.Videocam,
@@ -121,13 +117,9 @@ fun ChatTopBarV2(
                     tint = iconColor
                 )
             }
-            IconButton(onClick = onShareClick) {
-                Icon(
-                    imageVector = Icons.Default.Share,
-                    contentDescription = "Share chat",
-                    tint = iconColor
-                )
-            }
+
+            // 🔹 SEARCH + SHARE removed from here, moved into menu
+
             IconButton(onClick = { showMenu = true }) {
                 Icon(
                     imageVector = Icons.Default.MoreVert,
@@ -140,6 +132,25 @@ fun ChatTopBarV2(
                 expanded = showMenu,
                 onDismissRequest = { showMenu = false }
             ) {
+
+                // 🔍 Search
+                DropdownMenuItem(
+                    text = { Text("Search in chat") },
+                    onClick = {
+                        showMenu = false
+                        onSearchClick()
+                    }
+                )
+
+                // 📤 Share
+                DropdownMenuItem(
+                    text = { Text("Share chat") },
+                    onClick = {
+                        showMenu = false
+                        onShareClick()
+                    }
+                )
+
                 DropdownMenuItem(
                     text = { Text("Chat info") },
                     onClick = {
@@ -176,18 +187,19 @@ fun ChatTopBarV2(
     )
 }
 
+// ─────────────────────────────────────────────────────────────
+// SELECTION MODE TOP BAR (unchanged except mandatory parts)
+// ─────────────────────────────────────────────────────────────
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SelectionTopBarV2(
     count: Int,
     canReply: Boolean,
-    canShareOrForward: Boolean,
     onClearSelection: () -> Unit,
     onReply: () -> Unit,
     onStar: () -> Unit,
     onDelete: () -> Unit,
-    onForward: () -> Unit,
-    onMoreShare: () -> Unit,
+    onShareOrForward: () -> Unit,
     onPin: () -> Unit,
     onReport: () -> Unit
 ) {
@@ -196,7 +208,7 @@ fun SelectionTopBarV2(
     TopAppBar(
         title = {
             Text(
-                text = "$count selected",
+                text = "$count",
                 style = MaterialTheme.typography.titleMedium
             )
         },
@@ -225,13 +237,11 @@ fun SelectionTopBarV2(
                 )
             }
 
-            if (canShareOrForward) {
-                IconButton(onClick = onForward) {
-                    Icon(
-                        imageVector = Icons.Default.Forward,
-                        contentDescription = "Forward"
-                    )
-                }
+            IconButton(onClick = onShareOrForward) {
+                Icon(
+                    imageVector = Icons.Default.Share,
+                    contentDescription = "Share / Forward"
+                )
             }
 
             IconButton(onClick = onDelete) {
@@ -252,16 +262,6 @@ fun SelectionTopBarV2(
                 expanded = menuExpanded,
                 onDismissRequest = { menuExpanded = false }
             ) {
-                if (canShareOrForward) {
-                    DropdownMenuItem(
-                        text = { Text("Share") },
-                        onClick = {
-                            menuExpanded = false
-                            onMoreShare()
-                        }
-                    )
-                }
-
                 DropdownMenuItem(
                     text = { Text("Pin") },
                     onClick = {
@@ -269,7 +269,6 @@ fun SelectionTopBarV2(
                         onPin()
                     }
                 )
-
                 DropdownMenuItem(
                     text = { Text("Report") },
                     onClick = {

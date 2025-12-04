@@ -1408,35 +1408,17 @@ fun ChatScreenV2(
                 val canReply = selectedMessages.size == 1
 
 // Share / Forward only when at least one attachment / location / contact is selected
-                val canShareOrForward = selectedMessages.any { msg ->
-                    val mt = msg.mediaType.orEmpty()
-                    val hasMediaUrl = !msg.mediaUrl.isNullOrBlank()
-
-                    val isAttachmentType = mt in listOf(
-                        "image",
-                        "video",
-                        "audio",
-                        "file",
-                        "location",
-                        "live_location",
-                        "contact"
-                    )
-
-                    hasMediaUrl || isAttachmentType
-                }
-
+                val canShareOrForward = selectedMessages.isNotEmpty()
 
                 SelectionTopBarV2(
                     count = selectedMessageIds.size,
                     canReply = canReply,
-                    canShareOrForward = canShareOrForward,
                     onClearSelection = {
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
                     onReply = {
                         if (!canReply) return@SelectionTopBarV2
-                        // Reply to the first selected in chronological order
                         val msg = messages.firstOrNull { it.id in selectedMessageIds }
                         if (msg != null) {
                             replyTo = msg
@@ -1476,33 +1458,23 @@ fun ChatScreenV2(
                             ).show()
                         }
                     },
-                    onForward = {
+                    onShareOrForward = {
+                        // 🔥 Always share selected messages (text + media)
                         val toShare = messages.filter { it.id in selectedMessageIds }
                         shareMessagesExternally(toShare)
-                        selectedMessageIds = emptySet()
-                        vm.closeReactionPicker()
-                    },
 
-                    onMoreShare = {
-                        val toShare = messages.filter { it.id in selectedMessageIds }
-                        shareMessagesExternally(toShare)
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
 
                     onPin = {
-                        // Persist real pinned messages for this thread
                         selectedMessageIds.forEach { id ->
                             vm.pinMessage(id)
                         }
-
                         Toast.makeText(context, "Pinned", Toast.LENGTH_SHORT).show()
-
-                        // Clear selection + close reactions
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
-
                     onReport = {
                         vm.reportChat("Reported selected messages.")
                         Toast.makeText(context, "Report submitted", Toast.LENGTH_SHORT).show()
@@ -1510,6 +1482,7 @@ fun ChatScreenV2(
                         vm.closeReactionPicker()
                     }
                 )
+
             }
         }
 
