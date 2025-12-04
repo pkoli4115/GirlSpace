@@ -25,7 +25,4 @@
     <!-- ===========================================================
          ✅ LEGAL LINKS (optional UI references)
          =========================================================== -->
-    <string name="privacy_policy_url">https://pkoli4115.github.io/GirlSpace/privacy.html</string>
-    <string name="terms_of_service_url">https://pkoli4115.github.io/GirlSpace/terms.html</string>
-    <string name="data_deletion_url">https://pkoli4115.github.io/GirlSpace/delete.html</string>
 </resources>

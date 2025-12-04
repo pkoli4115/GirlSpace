@@ -8,6 +8,8 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
+import android.util.Log
+
 import android.content.ClipData
 import com.google.firebase.storage.storage
 import androidx.compose.material.icons.filled.StarBorder
@@ -1563,7 +1565,7 @@ fun ChatScreenV2(
                             isPlayingAudio = (msg.id == currentlyPlayingId),
                             onClick = {
                                 if (selectedMessageIds.isNotEmpty()) {
-                                    // toggle selection
+                                    // Toggle selection
                                     selectedMessageIds =
                                         if (isSelected) selectedMessageIds - msg.id
                                         else selectedMessageIds + msg.id
@@ -1573,9 +1575,33 @@ fun ChatScreenV2(
                                     msg.mediaType == "contact" ||
                                     msg.mediaUrl != null
                                 ) {
+                                    // Media / location / contact → open viewer
                                     openMessageMedia(msg)
+                                } else {
+                                    // Plain text message. If it is a reply (has the ↩ prefix),
+                                    // try to jump to the original by matching sender + snippet.
+                                    val text = msg.text
+                                    if (text.startsWith("↩ ")) {
+                                        // First line: "↩ sender: snippet"
+                                        val headerLine = text.substringBefore("\n")
+                                        val afterArrow = headerLine.removePrefix("↩ ").trim()
+                                        val sender = afterArrow.substringBefore(":").trim()
+                                        val snippet = afterArrow.substringAfter(":", "").trim()
+
+                                        // Look for the earliest message from that sender whose text starts with the snippet
+                                        val target = messages.firstOrNull { original ->
+                                            original.senderName.trim() == sender &&
+                                                    (snippet.isEmpty() || original.text.startsWith(snippet))
+                                        }
+
+                                        target?.let { original ->
+                                            vm.requestScrollTo(original.id)
+                                        }
+                                    }
                                 }
                             },
+
+
                             onLongPress = {
                                 // WA-style: long press enters selection AND opens reactions
                                 selectedMessageIds =
@@ -1585,10 +1611,18 @@ fun ChatScreenV2(
                                 vm.openReactionPicker(msg.id)
                             },
                             onReplyClick = {
+                                Toast.makeText(LocalContext.current, "REPLY CLICKED", Toast.LENGTH_SHORT).show()
+
+                                Log.d("Reply-Jump", "msg.id=${msg.id} replyTo=${msg.replyTo}")
+
                                 if (selectedMessageIds.isEmpty()) {
-                                    replyTo = msg
+                                    msg.replyTo?.let { originalId ->
+                                        vm.requestScrollTo(originalId)
+                                    }
                                 }
                             },
+
+
                             onMediaClick = { openMessageMedia(msg) },
                             onAudioClick = { playOrPauseAudio(msg) },
                             onReactionSelected = { emoji ->
@@ -1606,19 +1640,20 @@ fun ChatScreenV2(
 
                 // Jump-to-message listener for inline reply tap
                 val scrollTarget by vm.scrollToMessageId.collectAsState()
-                LaunchedEffect(scrollTarget) {
-                    val targetId = scrollTarget ?: return@LaunchedEffect
-                    val index = messages.indexOfFirst { it.id == targetId }
-                    if (index >= 0) {
+                LaunchedEffect(scrollTarget, messages) {
+                    val id = scrollTarget ?: return@LaunchedEffect
+
+                    val index = messages.indexOfFirst { it.id == id }
+                    if (index != -1) {
                         listState.animateScrollToItem(index)
-                        highlightedMessageId = targetId
+                        highlightedMessageId = id
                         delay(900)
-                        if (highlightedMessageId == targetId) {
-                            highlightedMessageId = null
-                        }
+                        highlightedMessageId = null
+                        vm.clearScrollRequest()
                     }
-                    vm.clearScrollRequest()
                 }
+
+
 
                 // Typing indicator
                 AnimatedVisibility(visible = isTyping) {
@@ -1644,10 +1679,11 @@ fun ChatScreenV2(
                 ReplyPreviewV2(
                     message = replyTo,
                     onClear = { replyTo = null },
-                    onJumpToMessage = { target ->
-                        vm.requestScrollTo(target.id)
+                    onJumpToMessage = { originalId ->
+                        vm.requestScrollTo(originalId)
                     }
                 )
+
 
                 // Bottom composer: WA-style layout
                 Row(
@@ -2281,7 +2317,7 @@ private fun ChatMessageBubbleV2(
     isPlayingAudio: Boolean,
     onClick: () -> Unit,
     onLongPress: () -> Unit,
-    onReplyClick: () -> Unit,
+    onReplyClick: @Composable () -> Unit,
     onMediaClick: () -> Unit,
     onAudioClick: () -> Unit,
     onReactionSelected: (String) -> Unit,
@@ -2639,7 +2675,7 @@ private fun ChatMessageBubbleV2(
 private fun ReplyPreviewV2(
     message: ChatMessage?,
     onClear: () -> Unit,
-    onJumpToMessage: (ChatMessage) -> Unit
+    onJumpToMessage: (String) -> Unit
 ) {
     if (message == null) return
 
@@ -2656,22 +2692,24 @@ private fun ReplyPreviewV2(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable { onJumpToMessage(message) },
+            // 👇 THIS is what makes the jump happen
+            .clickable {
+                // `message` here is the original ChatMessage you selected with "Reply"
+                onJumpToMessage(message.id)
+            }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
+            modifier = Modifier.weight(1f)
         ) {
             Text(
-                text = message.senderName.ifBlank { "GirlSpace user" },
+                text = "Replying to",
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = previewText,
                 style = MaterialTheme.typography.bodySmall,
@@ -2679,6 +2717,7 @@ private fun ReplyPreviewV2(
                 overflow = TextOverflow.Ellipsis
             )
         }
+
         TextButton(onClick = onClear) {
             Text("✕")
         }
