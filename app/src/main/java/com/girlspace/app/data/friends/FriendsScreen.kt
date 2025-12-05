@@ -1,4 +1,8 @@
 package com.girlspace.app.ui.friends
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.LaunchedEffect
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,10 +47,13 @@ import coil.request.ImageRequest
 import com.girlspace.app.data.friends.FriendRequestItem
 import com.girlspace.app.data.friends.FriendUserSummary
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FriendsScreen(
+    onOpenChat: (String) -> Unit = {},          // ✅ NEW: callback to open chat
     viewModel: FriendsViewModel = hiltViewModel()
 ) {
+
     val uiState by viewModel.uiState.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
@@ -96,13 +103,17 @@ fun FriendsScreen(
                 0 -> FriendsTab(
                     friends = uiState.friends,
                     followingIds = uiState.followingIds,
-                    onViewProfile = { /* TODO: wire navigation */ },
-                    onMessage = { /* TODO: wire chat navigation */ },
+                    onViewProfile = { /* TODO: wire profile navigation later */ },
+                    onMessage = { friendUid ->
+                        // ✅ delegate to HomeRoot → NavHost → ChatScreen
+                        onOpenChat(friendUid)
+                    },
                     onFollow = viewModel::followUser,
                     onUnfollow = viewModel::unfollowUser,
                     onUnfriend = viewModel::unfriend,
                     onBlock = viewModel::blockUser
                 )
+
 
                 1 -> RequestsTab(
                     requests = uiState.incomingRequests,
@@ -126,6 +137,7 @@ fun FriendsScreen(
                     outgoingRequestIds = uiState.outgoingRequestIds,
                     friends = uiState.friends
                 )
+
             }
 
             if (showGlobalLoading) {

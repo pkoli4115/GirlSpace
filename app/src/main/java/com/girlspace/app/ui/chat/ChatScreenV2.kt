@@ -8,7 +8,14 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
-
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.spring
+import androidx.compose.material3.Surface
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material.icons.filled.Close
 import android.util.Log
 import androidx.compose.material.icons.filled.PushPin
@@ -197,6 +204,8 @@ fun ChatScreenV2(
     val activity = context as? Activity
     val currentUid = FirebaseAuth.getInstance().currentUser?.uid
     val firestore = remember { FirebaseFirestore.getInstance() }
+    var showComposerEmoji by remember { mutableStateOf(false) }
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     val reactionPlayer = remember {
         MediaPlayer.create(context, R.raw.reaction_bee)
@@ -1378,36 +1387,46 @@ fun ChatScreenV2(
     Scaffold(
         topBar = {
             if (selectedMessageIds.isEmpty()) {
-                ChatTopBarV2(
-                    title = headerTitle,
-                    isOnline = isOtherOnline,
-                    lastSeen = lastSeenText,
-                    onBack = onBack,
-                    onSearchClick = { showSearchBar = !showSearchBar },
-                    onVideoClick = {
-                        // Batch-7: record and attach video
-                        requestCameraThen { openVideoRecorder() }
-                    },
-                    onShareClick = {
-                        val toShare = messages.takeLast(30)
-                        shareMessagesExternally(toShare)
-                        onShareThread()
-                    },
-
-
-                    onInfoClick = { showInfoDialog = true },
-                    onReportClick = { showReportDialog = true },
-                    onBlockClick = { showBlockConfirm = true },
-                    onAddParticipantsClick = { showAddParticipantsDialog = true }
-                )
+                // Gradient wrapper around existing ChatTopBarV2 – logic unchanged
+                Box(
+                    modifier = Modifier.background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                MaterialTheme.colorScheme.primary.copy(alpha = 0.97f),
+                                MaterialTheme.colorScheme.secondary.copy(alpha = 0.95f)
+                            )
+                        )
+                    )
+                ) {
+                    ChatTopBarV2(
+                        title = headerTitle,
+                        isOnline = isOtherOnline,
+                        lastSeen = lastSeenText,
+                        onBack = onBack,
+                        onSearchClick = { showSearchBar = !showSearchBar },
+                        onVideoClick = {
+                            // Batch-7: record and attach video
+                            requestCameraThen { openVideoRecorder() }
+                        },
+                        onShareClick = {
+                            val toShare = messages.takeLast(30)
+                            shareMessagesExternally(toShare)
+                            onShareThread()
+                        },
+                        onInfoClick = { showInfoDialog = true },
+                        onReportClick = { showReportDialog = true },
+                        onBlockClick = { showBlockConfirm = true },
+                        onAddParticipantsClick = { showAddParticipantsDialog = true }
+                    )
+                }
             } else {
                 // 🔹 Compute selected messages and capabilities
                 val selectedMessages = messages.filter { it.id in selectedMessageIds }
 
-// Reply only when exactly 1 message is selected
+                // Reply only when exactly 1 message is selected
                 val canReply = selectedMessages.size == 1
 
-// Share / Forward only when at least one attachment / location / contact is selected
+                // Share / Forward only when at least one attachment / location / contact is selected
                 val canShareOrForward = selectedMessages.isNotEmpty()
 
                 SelectionTopBarV2(
@@ -1466,7 +1485,6 @@ fun ChatScreenV2(
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
-
                     onPin = {
                         selectedMessageIds.forEach { id ->
                             vm.pinMessage(id)
@@ -1482,10 +1500,8 @@ fun ChatScreenV2(
                         vm.closeReactionPicker()
                     }
                 )
-
             }
         }
-
     ) { paddingValues ->
         Column(
             modifier = Modifier
@@ -1494,6 +1510,8 @@ fun ChatScreenV2(
                 .imePadding()
                 .navigationBarsPadding()
         ) {
+            // ... your existing content continues here ...
+
             if (selectedThread == null) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
@@ -1549,86 +1567,100 @@ fun ChatScreenV2(
                         val isSelected = selectedMessageIds.contains(msg.id)
                         val isHighlighted = (msg.id == highlightedMessageId)
 
-                        ChatMessageBubbleV2(
-                            message = msg,
-                            mine = mine,
-                            currentUserId = currentUid,
-                            isSelected = isSelected,
-                            isHighlighted = isHighlighted,
-                            showReactionStrip = (selectedMsgForReaction == msg.id),
-                            isPlayingAudio = (msg.id == currentlyPlayingId),
-                            onClick = {
-                                if (selectedMessageIds.isNotEmpty()) {
-                                    // Toggle selection
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .animateItemPlacement(
+                                    animationSpec = spring(
+                                        dampingRatio = 0.9f,
+                                        stiffness = 400f
+                                    )
+                                )
+                        ) {
+                            ChatMessageBubbleV2(
+                                message = msg,
+                                mine = mine,
+                                currentUserId = currentUid,
+                                isSelected = isSelected,
+                                isHighlighted = isHighlighted,
+                                showReactionStrip = (selectedMsgForReaction == msg.id),
+                                isPlayingAudio = (msg.id == currentlyPlayingId),
+                                onClick = {
+                                    if (selectedMessageIds.isNotEmpty()) {
+                                        // Toggle selection
+                                        selectedMessageIds =
+                                            if (isSelected) selectedMessageIds - msg.id
+                                            else selectedMessageIds + msg.id
+                                    } else if (
+                                        msg.mediaType == "location" ||
+                                        msg.mediaType == "live_location" ||
+                                        msg.mediaType == "contact" ||
+                                        msg.mediaUrl != null
+                                    ) {
+                                        // Media / location / contact → open viewer
+                                        openMessageMedia(msg)
+                                    } else {
+                                        // Plain text message. If it is a reply (has the ↩ prefix),
+                                        // try to jump to the original by matching sender + snippet.
+                                        val text = msg.text
+                                        if (text.startsWith("↩ ")) {
+                                            // First line: "↩ sender: snippet"
+                                            val headerLine = text.substringBefore("\n")
+                                            val afterArrow = headerLine.removePrefix("↩ ").trim()
+                                            val sender = afterArrow.substringBefore(":").trim()
+                                            val snippet = afterArrow.substringAfter(":", "").trim()
+
+                                            // Look for the earliest message from that sender
+                                            // whose text starts with the snippet
+                                            val target = messages.firstOrNull { original ->
+                                                original.senderName.trim() == sender &&
+                                                        (snippet.isEmpty() || original.text.startsWith(snippet))
+                                            }
+
+                                            target?.let { original ->
+                                                vm.requestScrollTo(original.id)
+                                            }
+                                        }
+                                    }
+                                },
+                                onLongPress = {
+                                    // WA-style: long press enters selection AND opens reactions
                                     selectedMessageIds =
                                         if (isSelected) selectedMessageIds - msg.id
                                         else selectedMessageIds + msg.id
-                                } else if (
-                                    msg.mediaType == "location" ||
-                                    msg.mediaType == "live_location" ||
-                                    msg.mediaType == "contact" ||
-                                    msg.mediaUrl != null
-                                ) {
-                                    // Media / location / contact → open viewer
-                                    openMessageMedia(msg)
-                                } else {
-                                    // Plain text message. If it is a reply (has the ↩ prefix),
-                                    // try to jump to the original by matching sender + snippet.
-                                    val text = msg.text
-                                    if (text.startsWith("↩ ")) {
-                                        // First line: "↩ sender: snippet"
-                                        val headerLine = text.substringBefore("\n")
-                                        val afterArrow = headerLine.removePrefix("↩ ").trim()
-                                        val sender = afterArrow.substringBefore(":").trim()
-                                        val snippet = afterArrow.substringAfter(":", "").trim()
 
-                                        // Look for the earliest message from that sender whose text starts with the snippet
-                                        val target = messages.firstOrNull { original ->
-                                            original.senderName.trim() == sender &&
-                                                    (snippet.isEmpty() || original.text.startsWith(snippet))
-                                        }
+                                    vm.openReactionPicker(msg.id)
+                                },
+                                onReplyClick = {
+                                    Toast.makeText(
+                                        LocalContext.current,
+                                        "REPLY CLICKED",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
 
-                                        target?.let { original ->
-                                            vm.requestScrollTo(original.id)
+                                    Log.d(
+                                        "Reply-Jump",
+                                        "msg.id=${msg.id} replyTo=${msg.replyTo}"
+                                    )
+
+                                    if (selectedMessageIds.isEmpty()) {
+                                        msg.replyTo?.let { originalId ->
+                                            vm.requestScrollTo(originalId)
                                         }
                                     }
+                                },
+                                onMediaClick = { openMessageMedia(msg) },
+                                onAudioClick = { playOrPauseAudio(msg) },
+                                onReactionSelected = { emoji ->
+                                    vm.reactToMessage(msg.id, emoji)
+                                    vm.closeReactionPicker()
+                                },
+                                onMoreReactions = {
+                                    reactionPickerMessageId = msg.id
+                                    vm.openReactionPicker(msg.id)
                                 }
-                            },
-
-
-                            onLongPress = {
-                                // WA-style: long press enters selection AND opens reactions
-                                selectedMessageIds =
-                                    if (isSelected) selectedMessageIds - msg.id
-                                    else selectedMessageIds + msg.id
-
-                                vm.openReactionPicker(msg.id)
-                            },
-                            onReplyClick = {
-                                Toast.makeText(LocalContext.current, "REPLY CLICKED", Toast.LENGTH_SHORT).show()
-
-                                Log.d("Reply-Jump", "msg.id=${msg.id} replyTo=${msg.replyTo}")
-
-                                if (selectedMessageIds.isEmpty()) {
-                                    msg.replyTo?.let { originalId ->
-                                        vm.requestScrollTo(originalId)
-                                    }
-                                }
-                            },
-
-
-                            onMediaClick = { openMessageMedia(msg) },
-                            onAudioClick = { playOrPauseAudio(msg) },
-                            onReactionSelected = { emoji ->
-                                vm.reactToMessage(msg.id, emoji)
-                                vm.closeReactionPicker()
-                            },
-                            onMoreReactions = {
-                                reactionPickerMessageId = msg.id
-                                vm.openReactionPicker(msg.id)
-                            }
-                        )
-
+                            )
+                        }
                     }
                 }
 
@@ -1642,14 +1674,13 @@ fun ChatScreenV2(
                         listState.animateScrollToItem(index)
                         highlightedMessageId = id
                         delay(900)
-                        highlightedMessageId = null
-                        vm.clearScrollRequest()
+                        if (highlightedMessageId == id) {
+                            highlightedMessageId = null
+                        }
                     }
+                    vm.clearScrollRequest()
                 }
-
-
-
-                // Typing indicator
+        // Typing indicator
                 AnimatedVisibility(visible = isTyping) {
                     Text(
                         text = "Typing…",
@@ -1687,13 +1718,20 @@ fun ChatScreenV2(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Emoji button → focuses text field to open system keyboard (emoji/GIF tabs)
-                    IconButton(onClick = { focusRequester.requestFocus() }) {
+                    IconButton(
+                        onClick = {
+                            // Focus the text field AND explicitly show keyboard
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                        }
+                    ) {
                         Icon(
                             imageVector = Icons.Default.EmojiEmotions,
                             contentDescription = "Emojis",
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
+
 
                     // Camera button (outside + menu)
                     IconButton(

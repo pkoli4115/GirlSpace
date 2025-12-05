@@ -3,9 +3,9 @@ package com.girlspace.app.ui.chat
 // GirlSpace – ChatViewModel.kt
 // Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
-
 import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestoreException
+import kotlinx.coroutines.flow.stateIn
 import java.io.File
 import android.provider.OpenableColumns
 import kotlinx.coroutines.flow.SharingStarted
@@ -34,9 +34,13 @@ import kotlinx.coroutines.withContext
 
 class ChatViewModel : ViewModel() {
 
-    private val auth = FirebaseAuth.getInstance()
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
     private val firestore = FirebaseFirestore.getInstance()
     private val storage = FirebaseStorage.getInstance()
+    private val messagesRef = firestore.collection("chat_messages")
+
+    private val currentUserId: String?
+        get() = auth.currentUser?.uid
 
     private val repo = ChatRepository(
         auth = auth,
@@ -202,34 +206,81 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
-
     // -------------------------------------------------------------
-    // FRIENDS + SUGGESTIONS (with presence)
-    // -------------------------------------------------------------
+// FRIENDS + SUGGESTIONS (with presence)
+// -------------------------------------------------------------
     private fun loadFriendsAndSuggestions() {
         val uid = auth.currentUser?.uid ?: return
 
         viewModelScope.launch {
             try {
-                val meDoc = firestore.collection("users")
-                    .document(uid)
-                    .get()
-                    .await()
+                val users = firestore.collection("users")
+                val meRef = users.document(uid)
 
+                val meDoc = meRef.get().await()
+
+                // 1) Old "following" based model (backwards compat)
                 val followingArray = meDoc.get("following") as? List<*>
                 val followingIds = followingArray
                     ?.filterIsInstance<String>()
-                    ?.toSet()
-                    ?: emptySet()
+                    ?: emptyList()
 
-                // Friends row
-                val friendSummaries = mutableListOf<ChatUserSummary>()
-                for (fid in followingIds) {
-                    val userDoc = firestore.collection("users")
-                        .document(fid)
+                // 2) New "friends" array, if your Friends screen uses this
+                val friendsArray = meDoc.get("friends") as? List<*>
+                val friendsIdsFromArray = friendsArray
+                    ?.filterIsInstance<String>()
+                    ?: emptyList()
+
+                // 3) Optional: users/{uid}/friends subcollection (older model)
+                val friendsSubDocs = try {
+                    meRef.collection("friends").get().await()
+                } catch (_: Exception) {
+                    null
+                }
+
+                val friendsIdsFromSubcollection = friendsSubDocs?.documents
+                    ?.mapNotNull { doc ->
+                        // either store friendId field or use doc.id
+                        doc.getString("friendId") ?: doc.id
+                    }
+                    ?: emptyList()
+
+                // 4) ✅ NEW: friends/{uid}/list subcollection (current Friends implementation)
+                val friendsRootDocs = try {
+                    firestore.collection("friends")
+                        .document(uid)
+                        .collection("list")
                         .get()
                         .await()
+                } catch (_: Exception) {
+                    null
+                }
 
+                val friendsIdsFromRootList = friendsRootDocs?.documents
+                    ?.mapNotNull { doc ->
+                        // prefer friendUid field, fall back to uid/doc.id
+                        doc.getString("friendUid")
+                            ?: doc.getString("uid")
+                            ?: doc.id
+                    }
+                    ?: emptyList()
+
+                // 🔹 Union of all ways we know friendships
+                val allFriendIds = (
+                        followingIds +
+                                friendsIdsFromArray +
+                                friendsIdsFromSubcollection +
+                                friendsIdsFromRootList
+                        )
+                    .filter { it.isNotBlank() && it != uid }
+                    .toSet()
+
+                // -----------------------------
+                // FRIENDS ROW (horizontal chips)
+                // -----------------------------
+                val friendSummaries = mutableListOf<ChatUserSummary>()
+                for (fid in allFriendIds) {
+                    val userDoc = users.document(fid).get().await()
                     if (!userDoc.exists()) continue
 
                     val displayName =
@@ -266,14 +317,13 @@ class ChatViewModel : ViewModel() {
                 }
                 _friends.value = friendSummaries
 
-                // Suggestions: friends-of-friends
-                val suggestionIds = mutableMapOf<String, Int>()
+                // -----------------------------
+                // SUGGESTIONS (friends-of-friends)
+                // -----------------------------
+                val suggestionCounts = mutableMapOf<String, Int>()
 
-                for (fid in followingIds) {
-                    val friendDoc = firestore.collection("users")
-                        .document(fid)
-                        .get()
-                        .await()
+                for (fid in allFriendIds) {
+                    val friendDoc = users.document(fid).get().await()
 
                     val friendFollowingArray = friendDoc.get("following") as? List<*>
                     val friendFollowingIds = friendFollowingArray
@@ -282,22 +332,19 @@ class ChatViewModel : ViewModel() {
 
                     friendFollowingIds.forEach { otherId ->
                         if (otherId == uid) return@forEach
-                        if (followingIds.contains(otherId)) return@forEach
-                        val current = suggestionIds[otherId] ?: 0
-                        suggestionIds[otherId] = current + 1
+                        if (allFriendIds.contains(otherId)) return@forEach
+
+                        val current = suggestionCounts[otherId] ?: 0
+                        suggestionCounts[otherId] = current + 1
                     }
                 }
 
                 val suggestionsList = mutableListOf<ChatUserSummary>()
-                suggestionIds.entries
+                suggestionCounts.entries
                     .sortedByDescending { it.value }
                     .take(20)
                     .forEach { (otherId, mutualCount) ->
-                        val userDoc = firestore.collection("users")
-                            .document(otherId)
-                            .get()
-                            .await()
-
+                        val userDoc = users.document(otherId).get().await()
                         if (!userDoc.exists()) return@forEach
 
                         val displayName =
@@ -338,6 +385,9 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
+
+    // -------------------------------------------------------------
 
     // -------------------------------------------------------------
     // THREADS + FILTER
@@ -589,43 +639,57 @@ class ChatViewModel : ViewModel() {
     fun selectThread(thread: ChatThread) {
         _selectedThread.value = thread
 
+        // -----------------------------------------
+        // -----------------------------------------
+        // 1) LISTEN FOR MESSAGES IN THIS THREAD
+        // -----------------------------------------
         msgListener?.remove()
-        msgListener = repo.observeMessages(thread.id) { msgs ->
-            _allMessages.value = msgs
+        msgListener = repo.observeMessages(threadId = thread.id) { incoming ->
+            val uid = currentUserId
 
-            // pagination: keep last [loadedMessageCount]
-            val slice = msgs.takeLast(loadedMessageCount)
+            // Merge incoming snapshot with our existing local state so that
+            // optimistic delete flags (deletedFor / deletedForAll) are not lost
+            val localMap = _allMessages.value.associateBy { it.id }
 
-            // apply local "delete for me" filter
-            val deleted = _locallyDeletedIds.value
-            _messages.value = slice.filter { it.id !in deleted }
+            val merged = incoming.map { msgFromServer ->
+                val local = localMap[msgFromServer.id]
+                if (local != null) {
+                    msgFromServer.copy(
+                        // union of deletedFor lists
+                        deletedFor = (msgFromServer.deletedFor + local.deletedFor).distinct(),
+                        // once true, stays true
+                        deletedForAll = msgFromServer.deletedForAll || local.deletedForAll
+                    )
+                } else {
+                    msgFromServer
+                }
+            }
 
-            markMessagesAsReadForCurrentUser(slice)
+            _allMessages.value = merged
+
+            // Recompute visible list using our central filter
+            recomputeVisibleMessages()
+
+            // Mark only the currently visible messages as read
+            markMessagesAsReadForCurrentUser(msgs = _messages.value)
         }
 
+
+        // Reset typing state for this thread
         _isTyping.value = false
         lastTypingSent = false
 
+        // Figure out "other" user in a 1:1 thread
         val myUid = auth.currentUser?.uid
         val otherUid = when (myUid) {
             null -> null
             thread.userA -> thread.userB
-            thread.userB -> thread.userA
-            else -> null
+            else -> thread.userA
         }
 
-        val otherName = when (myUid) {
-            thread.userA -> thread.userBName
-            thread.userB -> thread.userAName
-            else -> thread.userAName
-        }
-        _otherUserName.value = otherName
-        _otherUserId.value = otherUid   // 👈 NEW: needed for block list
-
-        // 👇 NEW: start pinned + blocked listeners for this thread
-        startPinnedAndBlockedListeners(thread.id)
-
-        // typing listener
+        // -----------------------------------------
+        // 2) TYPING LISTENER
+        // -----------------------------------------
         typingListener?.remove()
         if (otherUid != null) {
             typingListener = firestore.collection("typing_status")
@@ -639,7 +703,7 @@ class ChatViewModel : ViewModel() {
                     }
 
                     val now = System.currentTimeMillis()
-                    val cutoff = now - 8_000L
+                    val cutoff = now - 8_000L  // 8 seconds typing window
 
                     val otherTyping = snapshot?.documents
                         ?.firstOrNull { it.id == otherUid }
@@ -655,7 +719,9 @@ class ChatViewModel : ViewModel() {
             typingListener = null
         }
 
-        // presence listener
+        // -----------------------------------------
+        // 3) PRESENCE LISTENER (ONLINE / LAST SEEN)
+        // -----------------------------------------
         presenceListener?.remove()
         if (otherUid != null) {
             presenceListener = firestore.collection("user_status")
@@ -676,14 +742,13 @@ class ChatViewModel : ViewModel() {
                     }
 
                     val now = System.currentTimeMillis()
-                    val onlineThreshold = 90_000L
+                    val onlineThreshold = 90_000L // 90 sec
 
                     val online = now - lastActive <= onlineThreshold
                     _isOtherOnline.value = online
 
                     if (!online) {
-                        val diffMinutes =
-                            ((now - lastActive) / 60_000L).coerceAtLeast(1L)
+                        val diffMinutes = ((now - lastActive) / 60_000L).coerceAtLeast(1L)
 
                         val pretty = when {
                             diffMinutes < 60L -> "${diffMinutes} min ago"
@@ -706,10 +771,12 @@ class ChatViewModel : ViewModel() {
             presenceListener = null
         }
 
+        // Mark *me* active in presence collection
         viewModelScope.launch {
             markUserActive()
         }
     }
+
     private fun startPinnedAndBlockedListeners(threadId: String) {
         val uid = auth.currentUser?.uid ?: return
 
@@ -737,18 +804,19 @@ class ChatViewModel : ViewModel() {
     // Pagination: load older messages
     fun loadMoreMessages() {
         val all = _allMessages.value
-        val current = _messages.value
-        if (all.size <= current.size) return
+        if (all.isEmpty()) return
 
+        // Increase page size but don't exceed total
         loadedMessageCount = (loadedMessageCount + pageSize)
             .coerceAtMost(all.size)
 
-        val slice = all.takeLast(loadedMessageCount)
-        val deleted = _locallyDeletedIds.value
-        _messages.value = slice.filter { it.id !in deleted }
+        // Always derive visible list from the central helper
+        recomputeVisibleMessages()
     }
 
     // Mark messages as read for ticks
+    // Mark messages as read for ticks
+// Mark messages as read for ticks
     private fun markMessagesAsReadForCurrentUser(msgs: List<ChatMessage>) {
         val uid = auth.currentUser?.uid ?: return
 
@@ -757,16 +825,8 @@ class ChatViewModel : ViewModel() {
                 msgs
                     .filter { it.senderId != uid && !it.readBy.contains(uid) }
                     .forEach { msg ->
-                        // Prefer msg.threadId, fall back to selected thread
-                        val threadId = if (msg.threadId.isNotBlank()) {
-                            msg.threadId
-                        } else {
-                            _selectedThread.value?.id ?: return@forEach
-                        }
-
-                        firestore.collection("chatThreads")
-                            .document(threadId)
-                            .collection("messages")
+                        // ✅ Update the top-level chat_messages doc
+                        messagesRef
                             .document(msg.id)
                             .update("readBy", FieldValue.arrayUnion(uid))
                             .await()
@@ -1091,12 +1151,10 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
     // -------------------------------------------------------------
-// SEND CONTACT MESSAGE
-// -------------------------------------------------------------
+    // SEND CONTACT MESSAGE
     // -------------------------------------------------------------
-// SEND CONTACT MESSAGE
-// -------------------------------------------------------------
     fun sendContactMessage(
         name: String,
         phones: List<String>,
@@ -1132,8 +1190,8 @@ class ChatViewModel : ViewModel() {
     }
 
     // -------------------------------------------------------------
-// SEND LOCATION MESSAGE
-// -------------------------------------------------------------
+    // SEND LOCATION MESSAGE
+    // -------------------------------------------------------------
     fun sendLocationMessage(
         lat: Double,
         lng: Double,
@@ -1166,7 +1224,6 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    // -------------------------------------------------------------
     // -------------------------------------------------------------
     // REACTIONS
     // -------------------------------------------------------------
@@ -1246,73 +1303,138 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
-    // -------------------------------------------------------------
-    // DELETE / UNSEND
-    // -------------------------------------------------------------
+
+    // ----------------------------------------------------------------------
+    // Deletion helpers
+    // ----------------------------------------------------------------------
+
     /**
-     * Delete for me (local only):
-     * - Do NOT touch Firestore.
-     * - Just hide this message on this device via _locallyDeletedIds.
+     * Recompute which messages are visible for the current user.
+     *
+     * Filters out:
+     *  - messages deleted for everyone
+     *  - messages deleted for this user (deletedFor contains uid)
+     *  - any locally deleted ids (in _locallyDeletedIds)
+     */
+    private fun recomputeVisibleMessages() {
+        val uid = currentUserId ?: return
+        val deletedLocalIds = _locallyDeletedIds.value
+
+        val visible = _allMessages.value
+            .takeLast(loadedMessageCount)
+            .filter { msg ->
+                !msg.deletedForAll &&
+                        uid !in msg.deletedFor &&
+                        msg.id !in deletedLocalIds
+            }
+
+        _messages.value = visible
+    }
+
+    /**
+     * Delete a message only for the current user.
+     *
+     * - Locally: mark in _allMessages as deletedFor += uid
+     * - Remotely: add uid to deletedFor in Firestore
+     * - UI is always derived from recomputeVisibleMessages()
      */
     fun deleteMessageForMe(messageId: String) {
-        // Mark this message as locally deleted
-        _locallyDeletedIds.value = _locallyDeletedIds.value + messageId
+        val uid = auth.currentUser?.uid ?: return
 
-        // Rebuild the visible slice and exclude locally deleted ids
-        val slice = _allMessages.value.takeLast(loadedMessageCount)
-        val deleted = _locallyDeletedIds.value
-        _messages.value = slice.filter { it.id !in deleted }
+        // ✅ Optimistic local update: add uid to deletedFor for that message
+        val updatedAll = _allMessages.value.map { msg ->
+            if (msg.id == messageId) {
+                msg.copy(
+                    deletedFor = (msg.deletedFor + uid).distinct()
+                )
+            } else {
+                msg
+            }
+        }
+        _allMessages.value = updatedAll
+        recomputeVisibleMessages()
+
+        // 🔁 Persist in Firestore on chat_messages/{messageId}
+        viewModelScope.launch {
+            try {
+                val docRef = messagesRef.document(messageId)
+
+                val snap = docRef.get().await()
+                if (!snap.exists()) {
+                    Log.w(
+                        "ChatViewModel",
+                        "deleteMessageForMe: message already deleted in Firestore"
+                    )
+                    return@launch
+                }
+
+                docRef.update(
+                    "deletedFor",
+                    FieldValue.arrayUnion(uid)
+                ).await()
+            } catch (e: FirebaseFirestoreException) {
+                if (e.code == FirebaseFirestoreException.Code.NOT_FOUND) {
+                    Log.w(
+                        "ChatViewModel",
+                        "deleteMessageForMe: NOT_FOUND, treating as deleted",
+                        e
+                    )
+                } else {
+                    Log.e("ChatViewModel", "deleteMessageForMe Firestore error", e)
+                    _errorMessage.value = e.message
+                }
+            } catch (e: Exception) {
+                Log.e("ChatViewModel", "deleteMessageForMe failed", e)
+                _errorMessage.value = e.message
+            }
+        }
     }
 
     /**
      * Delete for everyone (unsend):
-     * - Soft delete in Firestore: blank text, clear mediaUrl/mediaType.
+     * - Soft delete in Firestore: mark deletedForAll = true, clear media fields.
      * - Try deleting the media file from Storage (if any).
      * - ALSO update local _allMessages/_messages immediately so UI changes instantly.
      */
-
     fun unsendMessage(messageId: String) {
-        val threadId = _selectedThread.value?.id ?: return
-
-        // ✅ Optimistic local update so UI shows "This message was deleted" instantly
+        // ✅ Optimistic local update so UI hides it immediately for everyone
         val updatedAll = _allMessages.value.map { msg ->
             if (msg.id == messageId) {
                 msg.copy(
                     text = "This message was deleted",
                     mediaUrl = null,
-                    mediaType = null
+                    mediaType = null,
+                    deletedForAll = true
                 )
             } else msg
         }
         _allMessages.value = updatedAll
+        recomputeVisibleMessages()
 
-        val deletedLocalIds = _locallyDeletedIds.value
-        val visibleSlice = updatedAll
-            .takeLast(loadedMessageCount)
-            .filter { it.id !in deletedLocalIds }
-        _messages.value = visibleSlice
-
-        // 🔁 Remote Firestore + Storage update
+        // 🔁 Remote Firestore + Storage update on chat_messages/{messageId}
         viewModelScope.launch {
             try {
-                val docRef = firestore.collection("chatThreads")
-                    .document(threadId)
-                    .collection("messages")
-                    .document(messageId)
+                val docRef = messagesRef.document(messageId)
 
                 val snap = docRef.get().await()
-                if (!snap.exists()) return@launch
+                if (!snap.exists()) {
+                    Log.w("ChatViewModel", "unsendMessage: message not found in Firestore")
+                    return@launch
+                }
 
                 val mediaUrl = snap.getString("mediaUrl")
 
+                // 1️⃣ Mark deleted for everyone in Firestore
                 docRef.update(
                     mapOf(
                         "text" to "This message was deleted",
                         "mediaUrl" to null,
-                        "mediaType" to null
+                        "mediaType" to null,
+                        "deletedForAll" to true
                     )
                 ).await()
 
+                // 2️⃣ Try removing media from Storage
                 if (!mediaUrl.isNullOrBlank()) {
                     try {
                         val ref = storage.getReferenceFromUrl(mediaUrl)

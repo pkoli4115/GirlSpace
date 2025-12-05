@@ -298,27 +298,33 @@ class ChatRepository(
             @Suppress("UNCHECKED_CAST")
             val reactionsMap = get("reactions") as? Map<String, String> ?: emptyMap()
 
-            // --- Soft-delete normalization (critical for media delete) ---
+            // --- Soft-delete normalization (for legacy data) ---
             val rawText = getString("text") ?: ""
-            val deleted = rawText == "This message was deleted"
+            val legacyDeleted = rawText == "This message was deleted"
 
-            // If deleted → null out media fields client-side, even if old DB had stale values
-            val finalMediaUrl = if (deleted) null else getString("mediaUrl")
-            val finalMediaType = if (deleted) null else getString("mediaType")
-            val finalMediaThumb = if (deleted) null else getString("mediaThumbnail")
-            val finalAudioDuration = if (deleted) null else getLong("audioDuration")
+            // New explicit flags
+            val deletedForAllFlag = getBoolean("deletedForAll") ?: legacyDeleted
+            val deletedForList = (get("deletedFor") as? List<String>) ?: emptyList()
+
+            // If deletedForAll → null out media fields client-side
+            val isDeletedCompletely = deletedForAllFlag
+
+            val finalMediaUrl = if (isDeletedCompletely) null else getString("mediaUrl")
+            val finalMediaType = if (isDeletedCompletely) null else getString("mediaType")
+            val finalMediaThumb = if (isDeletedCompletely) null else getString("mediaThumbnail")
+            val finalAudioDuration = if (isDeletedCompletely) null else getLong("audioDuration")
 
             // 🔹 Extra payload (location / contact / etc.)
             @Suppress("UNCHECKED_CAST")
             val extraPayload: Map<String, Any>? =
-                if (deleted) {
+                if (isDeletedCompletely) {
                     null
                 } else {
                     get("extra") as? Map<String, Any>
                 }
 
             ChatMessage(
-                id = getString("id") ?: "",
+                id = getString("id") ?: id,      // fall back to doc.id
                 threadId = getString("threadId") ?: "",
                 senderId = getString("senderId") ?: "",
                 senderName = getString("senderName") ?: "",
@@ -331,7 +337,9 @@ class ChatRepository(
                 createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
                 readBy = (get("readBy") as? List<String>) ?: emptyList(),
                 reactions = reactionsMap,
-                extra = extraPayload          // ✅ this was missing
+                extra = extraPayload,
+                deletedForAll = deletedForAllFlag,
+                deletedFor = deletedForList
             )
 
         } catch (e: Exception) {
@@ -339,4 +347,5 @@ class ChatRepository(
             null
         }
     }
+
 }

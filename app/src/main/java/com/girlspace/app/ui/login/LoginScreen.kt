@@ -1,5 +1,15 @@
 package com.girlspace.app.ui.login
-
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.background
+import androidx.compose.animation.Crossfade
+import androidx.compose.foundation.Image
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import android.app.Activity
 import android.util.Log
 import android.widget.Toast
@@ -37,6 +47,55 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import java.util.concurrent.TimeUnit
+import androidx.compose.ui.res.painterResource
+data class LoginBackgroundSlide(
+    @DrawableRes val imageRes: Int,
+    val title: String,
+    val subtitle: String
+)
+
+private val togetherlyLoginSlides = listOf(
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_friends,
+        title = "Be together.",
+        subtitle = "Real people. Real connections."
+    ),
+        LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_chat,
+        title = "Say what you feel.",
+        subtitle = "Fast, private conversations."
+    ),
+LoginBackgroundSlide(
+imageRes = R.drawable.login_bg_spiritual,
+title = "Be Spiritual.",
+subtitle = "Grow with Devotion."
+),
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_community,
+        title = "Find your people.",
+        subtitle = "Communities that feel like home."
+    ),
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_families,
+        title = "Find your people.",
+        subtitle = "Families that come together."
+    ),
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_fun,
+        title = "Moments that matter.",
+        subtitle = "Share life as it happens."
+    ),
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_global,
+        title = "One world. One space.",
+        subtitle = "Everyone belongs."
+    ),
+    LoginBackgroundSlide(
+        imageRes = R.drawable.login_bg_abstract,
+        title = "Togetherly",
+        subtitle = "Your social world."
+    )
+)
 
 @Composable
 fun LoginScreen(
@@ -86,8 +145,11 @@ fun LoginScreen(
                 firebaseAuth.signInWithCredential(credential)
                     .addOnCompleteListener(activity) { authResult ->
                         if (authResult.isSuccessful) {
-                            Toast.makeText(context, "Google login success", Toast.LENGTH_SHORT)
-                                .show()
+                            Toast.makeText(
+                                context,
+                                "Google login success",
+                                Toast.LENGTH_SHORT
+                            ).show()
                             handleAuthSuccess(
                                 navController = navController,
                                 firebaseAuth = firebaseAuth,
@@ -108,8 +170,11 @@ fun LoginScreen(
                         }
                     }
             } else {
-                Toast.makeText(context, "Google login failed: No ID token", Toast.LENGTH_LONG)
-                    .show()
+                Toast.makeText(
+                    context,
+                    "Google login failed: No ID token",
+                    Toast.LENGTH_LONG
+                ).show()
             }
         } catch (e: Exception) {
             Log.e("GirlSpace", "Google sign-in error", e)
@@ -162,7 +227,11 @@ fun LoginScreen(
                 }
 
                 override fun onCancel() {
-                    Toast.makeText(context, "Facebook login cancelled", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(
+                        context,
+                        "Facebook login cancelled",
+                        Toast.LENGTH_SHORT
+                    ).show()
                 }
 
                 override fun onError(error: FacebookException) {
@@ -234,161 +303,256 @@ fun LoginScreen(
 
     // ---------- UI ----------
 
+    val slides = remember { togetherlyLoginSlides }
+    var currentIndex by remember { mutableStateOf(0) }
+
+    // Rotate background + quote
+    LaunchedEffect(Unit) {
+        while (slides.isNotEmpty()) {
+            delay(2000L) // 5 seconds per slide
+            currentIndex = (currentIndex + 1) % slides.size
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "Welcome to GirlSpace",
-                style = MaterialTheme.typography.headlineMedium
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Login to continue. You can always change your vibe later.",
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            // 🔹 Google Login
-            Button(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    // Clear last Google account so picker shows
-                    googleSignInClient.signOut().addOnCompleteListener {
-                        val signInIntent = googleSignInClient.signInIntent
-                        googleLauncher.launch(signInIntent)
-                    }
-                }
-            ) {
-                Text("Continue with Google")
-            }
-
-            // 🔹 Facebook Login
-            Button(
-                modifier = Modifier.fillMaxWidth(),
-                onClick = {
-                    LoginManager.getInstance()
-                        .logInWithReadPermissions(activity, listOf("public_profile", "email"))
-                }
-            ) {
-                Text("Continue with Facebook")
-            }
-
-            // 🔹 Phone number login
-            Spacer(modifier = Modifier.height(16.dp))
-            Text(
-                text = "Or use phone OTP",
-                style = MaterialTheme.typography.bodyMedium
-            )
-
-            OutlinedTextField(
-                value = phoneNumber,
-                onValueChange = { phoneNumber = it },
-                label = { Text("Phone number (+91...)") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions.Default.copy(
-                    keyboardType = KeyboardType.Phone
+        // BACKGROUND: image + dark gradient overlay
+        Crossfade(
+            targetState = slides[currentIndex],
+            label = "loginBackgroundCrossfade"
+        ) { slide ->
+            Box(modifier = Modifier.fillMaxSize()) {
+                Image(
+                    painter = painterResource(id = slide.imageRes),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
                 )
-            )
 
-            if (otpSent) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xCC000000),
+                                    Color(0x99000000),
+                                    Color(0xE6000000)
+                                )
+                            )
+                        )
+                )
+            }
+        }
+
+        // FOREGROUND CONTENT
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    start = 24.dp,
+                    top = 24.dp,
+                    end = 24.dp,
+                    bottom = 64.dp // extra bottom padding to lift the form
+                ),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Top branding
+            Column(
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text(
+                    text = "Togetherly",
+                    color = Color.White,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Your social world.",
+                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            // Middle: current slide quote
+            val slide = slides[currentIndex]
+            Column(
+                horizontalAlignment = Alignment.Start
+            ) {
+                Text(
+                    text = slide.title,
+                    color = Color.White,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = slide.subtitle,
+                    color = Color.White.copy(alpha = 0.9f),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            // Bottom: login form
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Welcome to Togetherly",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = Color.White
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "Continue with Togetherly.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White.copy(alpha = 0.9f)
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 🔹 Google Login
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        googleSignInClient.signOut().addOnCompleteListener {
+                            val signInIntent = googleSignInClient.signInIntent
+                            googleLauncher.launch(signInIntent)
+                        }
+                    }
+                ) {
+                    Text("Continue with Google")
+                }
+
+                // 🔹 Facebook Login
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    onClick = {
+                        LoginManager.getInstance()
+                            .logInWithReadPermissions(
+                                activity,
+                                listOf("public_profile", "email")
+                            )
+                    }
+                ) {
+                    Text("Continue with Facebook")
+                }
+
+                // 🔹 Phone number login
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Or use phone OTP",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color.White
+                )
+
                 OutlinedTextField(
-                    value = otpCode,
-                    onValueChange = { otpCode = it },
-                    label = { Text("Enter OTP") },
+                    value = phoneNumber,
+                    onValueChange = { phoneNumber = it },
+                    label = { Text("Phone number (+91...)", color = Color.White) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions.Default.copy(
-                        keyboardType = KeyboardType.Number
+                        keyboardType = KeyboardType.Phone
                     )
                 )
 
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = {
-                        val verId = verificationId
-                        if (verId.isNullOrEmpty()) {
-                            Toast.makeText(
-                                context,
-                                "No verification ID, please resend OTP",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else if (otpCode.isBlank()) {
-                            Toast.makeText(
-                                context,
-                                "Enter OTP",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        } else {
-                            isVerifying = true
-                            val credential =
-                                PhoneAuthProvider.getCredential(verId, otpCode.trim())
-                            firebaseAuth.signInWithCredential(credential)
-                                .addOnCompleteListener(activity) { authResult ->
-                                    isVerifying = false
-                                    if (authResult.isSuccessful) {
-                                        Toast.makeText(
-                                            context,
-                                            "Phone login success",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
-                                        handleAuthSuccess(
-                                            navController = navController,
-                                            firebaseAuth = firebaseAuth,
-                                            provider = "phone",
-                                            phoneNumberOverride = phoneNumber
-                                        )
-                                    } else {
-                                        Toast.makeText(
-                                            context,
-                                            "OTP verify failed: ${authResult.exception?.localizedMessage}",
-                                            Toast.LENGTH_LONG
-                                        ).show()
+                if (otpSent) {
+                    OutlinedTextField(
+                        value = otpCode,
+                        onValueChange = { otpCode = it },
+                        label = { Text("Enter OTP", color = Color.White) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions.Default.copy(
+                            keyboardType = KeyboardType.Number
+                        )
+                    )
+
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            val verId = verificationId
+                            if (verId.isNullOrEmpty()) {
+                                Toast.makeText(
+                                    context,
+                                    "No verification ID, please resend OTP",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else if (otpCode.isBlank()) {
+                                Toast.makeText(
+                                    context,
+                                    "Enter OTP",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } else {
+                                isVerifying = true
+                                val credential =
+                                    PhoneAuthProvider.getCredential(verId, otpCode.trim())
+                                firebaseAuth.signInWithCredential(credential)
+                                    .addOnCompleteListener(activity) { authResult ->
+                                        isVerifying = false
+                                        if (authResult.isSuccessful) {
+                                            Toast.makeText(
+                                                context,
+                                                "Phone login success",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                            handleAuthSuccess(
+                                                navController = navController,
+                                                firebaseAuth = firebaseAuth,
+                                                provider = "phone",
+                                                phoneNumberOverride = phoneNumber
+                                            )
+                                        } else {
+                                            Toast.makeText(
+                                                context,
+                                                "OTP verify failed: ${authResult.exception?.localizedMessage}",
+                                                Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    }
+                            }
+                        }
+                    ) {
+                        Text(if (isVerifying) "Verifying..." else "Verify & Continue")
+                    }
+                } else {
+                    Button(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = {
+                            if (phoneNumber.isBlank()) {
+                                Toast.makeText(
+                                    context,
+                                    "Enter phone number",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                return@Button
+                            }
+                            isSendingOtp = true
+                            val options = PhoneAuthOptions.newBuilder(firebaseAuth)
+                                .setPhoneNumber(phoneNumber.trim())
+                                .setTimeout(60L, TimeUnit.SECONDS)
+                                .setActivity(activity)
+                                .setCallbacks(phoneCallbacks)
+                                .apply {
+                                    resendToken?.let {
+                                        this.setForceResendingToken(it)
                                     }
                                 }
+                                .build()
+                            PhoneAuthProvider.verifyPhoneNumber(options)
                         }
+                    ) {
+                        Text(if (isSendingOtp) "Sending OTP..." else "Send OTP")
                     }
-                ) {
-                    Text(if (isVerifying) "Verifying..." else "Verify & Continue")
-                }
-            } else {
-                Button(
-                    modifier = Modifier.fillMaxWidth(),
-                    onClick = {
-                        if (phoneNumber.isBlank()) {
-                            Toast.makeText(
-                                context,
-                                "Enter phone number",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            return@Button
-                        }
-                        isSendingOtp = true
-                        val options = PhoneAuthOptions.newBuilder(firebaseAuth)
-                            .setPhoneNumber(phoneNumber.trim())
-                            .setTimeout(60L, TimeUnit.SECONDS)
-                            .setActivity(activity)
-                            .setCallbacks(phoneCallbacks)
-                            .apply {
-                                resendToken?.let {
-                                    this.setForceResendingToken(it)
-                                }
-                            }
-                            .build()
-                        PhoneAuthProvider.verifyPhoneNumber(options)
-                    }
-                ) {
-                    Text(if (isSendingOtp) "Sending OTP..." else "Send OTP")
                 }
             }
         }
@@ -466,11 +630,10 @@ private fun saveUserProfileToFirestore(
                 "provider" to provider,
                 "updatedAt" to FieldValue.serverTimestamp()
             ).apply {
-                // 📌 Preserve existing photoUrl if it exists (from Firestore)
+                // Preserve existing photoUrl if already stored
                 val existingPhoto = snapshot.getString("photoUrl")
                 put("photoUrl", existingPhoto ?: (user.photoUrl?.toString() ?: ""))
-            }
-                .apply {
+            }.apply {
                 put("plan", existingPlan ?: "free")
                 put("isPremium", existingIsPremium ?: false)
                 // Only default hasVibe=false when doc is new or field missing
@@ -479,7 +642,10 @@ private fun saveUserProfileToFirestore(
 
             userDocRef.set(profile, SetOptions.merge())
                 .addOnSuccessListener {
-                    Log.d("GirlSpace", "User profile saved for uid=$uid (exists=$alreadyExists)")
+                    Log.d(
+                        "GirlSpace",
+                        "User profile saved for uid=$uid (exists=$alreadyExists)"
+                    )
                 }
                 .addOnFailureListener { e ->
                     Log.e("GirlSpace", "Failed to save user profile", e)

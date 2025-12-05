@@ -1,5 +1,9 @@
 package com.girlspace.app.ui.home
-
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -48,13 +52,16 @@ enum class HomeTab {
     Feed, Reels, Chats, Friends, Communities, Menu
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HomeRoot(
     navController: NavHostController,
-    onLogout: () -> Unit,       // used in Menu
-    onUpgrade: () -> Unit,      // used by Communities + Menu
-    onOpenProfile: () -> Unit   // opens full ProfileScreen route (used in Menu)
+    onLogout: () -> Unit,            // used in Menu
+    onUpgrade: () -> Unit,           // used by Communities + Menu
+    onOpenProfile: () -> Unit,       // opens full ProfileScreen route (used in Menu)
+    onOpenChatFromFriends: (String) -> Unit   // NEW: friendUid → open chat
 ) {
+
     // 🔹 Start listening to plan limits once the user is in Home
     LaunchedEffect(Unit) {
         PlanLimitsRepository.start()
@@ -66,13 +73,33 @@ fun HomeRoot(
     val selectedColor = MaterialTheme.colorScheme.primary
     val unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
 
+    // 🔄 Pager state for horizontal swipe between main tabs
+    val pagerState = rememberPagerState(
+        initialPage = currentTab.ordinal
+    ) {
+        HomeTab.values().size
+    }
+    val scope = rememberCoroutineScope()
+
+    // Keep currentTab in sync with pager swipes
+    LaunchedEffect(pagerState.currentPage) {
+        val page = pagerState.currentPage
+        if (currentTab.ordinal != page) {
+            currentTab = HomeTab.values()[page]
+        }
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar {
                 // Home
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Feed,
-                    onClick = { currentTab = HomeTab.Feed },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Feed.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Home,
@@ -86,7 +113,11 @@ fun HomeRoot(
                 // Reels
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Reels,
-                    onClick = { currentTab = HomeTab.Reels },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Reels.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Movie,
@@ -100,7 +131,11 @@ fun HomeRoot(
                 // Chats
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Chats,
-                    onClick = { currentTab = HomeTab.Chats },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Chats.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Chat,
@@ -114,7 +149,11 @@ fun HomeRoot(
                 // Friends (two-person outline)
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Friends,
-                    onClick = { currentTab = HomeTab.Friends },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Friends.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Outlined.Group,
@@ -128,7 +167,11 @@ fun HomeRoot(
                 // Communities (three-person groups icon)
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Communities,
-                    onClick = { currentTab = HomeTab.Communities },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Communities.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Groups,
@@ -142,7 +185,11 @@ fun HomeRoot(
                 // Menu (Profile, Settings, etc.)
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Menu,
-                    onClick = { currentTab = HomeTab.Menu },
+                    onClick = {
+                        scope.launch {
+                            pagerState.animateScrollToPage(HomeTab.Menu.ordinal)
+                        }
+                    },
                     icon = {
                         Icon(
                             imageVector = Icons.Filled.Menu,
@@ -169,34 +216,40 @@ fun HomeRoot(
                 .padding(padding)
                 .fillMaxSize()
         ) {
-            when (currentTab) {
-                HomeTab.Feed -> FeedScreen(
-                    isCreatePostOpen = showCreatePost,
-                    onDismissCreatePost = { showCreatePost = false }
-                )
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxSize()
+            ) { page ->
+                when (HomeTab.values()[page]) {
+                    HomeTab.Feed -> FeedScreen(
+                        isCreatePostOpen = showCreatePost,
+                        onDismissCreatePost = { showCreatePost = false }
+                    )
 
-                HomeTab.Reels -> ReelsTab()
+                    HomeTab.Reels -> ReelsTab()
 
-                HomeTab.Chats -> ChatsScreen(
-                    onOpenThread = { thread ->
-                        // ChatScreen uses threadId argument
-                        navController.navigate("chat/${thread.id}")
-                    }
-                )
+                    HomeTab.Chats -> ChatsScreen(
+                        onOpenThread = { thread ->
+                            // ChatScreen uses threadId argument
+                            navController.navigate("chat/${thread.id}")
+                        }
+                    )
 
-                // ✅ Use the new FriendsScreen
-                HomeTab.Friends -> FriendsScreen()
+                    HomeTab.Friends -> FriendsScreen(
+                        onOpenChat = onOpenChatFromFriends
+                    )
 
-                HomeTab.Communities -> GroupsScreen(
-                    navController = navController,
-                    onUpgrade = onUpgrade
-                )
+                    HomeTab.Communities -> GroupsScreen(
+                        navController = navController,
+                        onUpgrade = onUpgrade
+                    )
 
-                HomeTab.Menu -> MenuTab(
-                    onOpenProfile = onOpenProfile,
-                    onUpgrade = onUpgrade,
-                    onLogout = onLogout
-                )
+                    HomeTab.Menu -> MenuTab(
+                        onOpenProfile = onOpenProfile,
+                        onUpgrade = onUpgrade,
+                        onLogout = onLogout
+                    )
+                }
             }
         }
     }

@@ -16,7 +16,8 @@ data class ChatMessage(
     val reactions: Map<String, String> = emptyMap(),
     val createdAt: Timestamp = Timestamp.now(),
     val readBy: List<String> = emptyList(),
-
+    val deletedForAll: Boolean = false,
+    val deletedFor: List<String> = emptyList(),
     // 🔹 EXTRA payload from Firestore: location, contact, etc.
     val extra: Map<String, Any>? = null
 ) {

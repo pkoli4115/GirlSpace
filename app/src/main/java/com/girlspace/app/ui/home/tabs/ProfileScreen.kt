@@ -1,5 +1,5 @@
 package com.girlspace.app.ui.profile
-
+import com.girlspace.app.utils.AppInfo
 import androidx.compose.foundation.layout.width
 import android.app.Activity
 import android.util.Log
@@ -91,13 +91,13 @@ fun ProfileScreen(
             .document(uid)
             .addSnapshotListener { snap, e ->
                 if (e != null) {
-                    Log.e("GirlSpace", "Profile listen failed", e)
+                    Log.e("Togetherly", "Profile listen failed", e)
                     return@addSnapshotListener
                 }
                 val doc = snap ?: return@addSnapshotListener
 
                 name = (doc.getString("name") ?: user.displayName ?: "")
-                    .ifBlank { "GirlSpace user" }
+                    .ifBlank { "Togetherly user" }
                 email = (doc.getString("email") ?: user.email ?: "")
                 phone = (doc.getString("phone") ?: user.phoneNumber ?: "")
                 provider = (doc.getString("provider")
@@ -177,14 +177,14 @@ fun ProfileScreen(
                                     SetOptions.merge()
                                 )
                                 .addOnFailureListener { e ->
-                                    Log.e("GirlSpace", "Failed to save photoUrl", e)
+                                    Log.e("Togetherly", "Failed to save photoUrl", e)
                                 }
                             isUploadingAvatar = false
                             Toast.makeText(context, "Profile photo updated", Toast.LENGTH_SHORT)
                                 .show()
                         }
                         .addOnFailureListener { e ->
-                            Log.e("GirlSpace", "Failed to get download URL", e)
+                            Log.e("Togetherly", "Failed to get download URL", e)
                             isUploadingAvatar = false
                             Toast.makeText(
                                 context,
@@ -194,7 +194,7 @@ fun ProfileScreen(
                         }
                 }
                 .addOnFailureListener { e ->
-                    Log.e("GirlSpace", "Avatar upload failed", e)
+                    Log.e("Togetherly", "Avatar upload failed", e)
                     isUploadingAvatar = false
                     Toast.makeText(
                         context,
@@ -442,10 +442,58 @@ fun ProfileScreen(
                     textAlign = TextAlign.Center
                 )
             }
+
+            // --- Release / Version info section ---
+            Spacer(modifier = Modifier.height(24.dp))
+
+            val versionName = AppInfo.versionName(context)
+            val versionCode = AppInfo.versionCode(context)
+
+            androidx.compose.material3.Divider()
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "Togetherly",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = "Version $versionName (Build $versionCode)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center
+                )
+
+                Text(
+                    text = "Release: Production",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(2.dp))
+
+                Text(
+                    text = "© 2025 QTI Labs Pvt. Ltd.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center
+                )
+            }
         }
     }
 
-    // Vibe selection dialog
+    // Vibe selection dialog – STILL inside ProfileScreen
     if (showVibeDialog) {
         AlertDialog(
             onDismissRequest = { showVibeDialog = false },
@@ -498,6 +546,7 @@ fun ProfileScreen(
     }
 }
 
+
 private data class VibeOption(
     val key: String,
     val label: String,
@@ -528,4 +577,5 @@ private fun changeVibe(
                 SetOptions.merge()
             )
     }
+
 }
