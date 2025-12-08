@@ -8,6 +8,7 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
@@ -345,10 +346,23 @@ fun ChatScreenV2(
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
 
-    // Auto-scroll to bottom for new messages if already near bottom
+    // Derived flag: are we already near the bottom of the list?
+    // This avoids doing layoutInfo math in multiple places and makes
+    // scroll-to-bottom cheaper to evaluate.
+    val isAtBottom by remember {
+        derivedStateOf {
+            val lastVisibleIndex =
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = listState.layoutInfo.totalItemsCount
+            // Treat empty list as "at bottom" to avoid unnecessary scroll work
+            total == 0 || lastVisibleIndex >= total - 2
+        }
+    }
+
+    // Auto-scroll to bottom for new messages if user is already near bottom
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            // Bee sound for new incoming messages
+            // Bee sound for new incoming messages (existing behavior preserved)
             if (!initialMessagesHandled) {
                 initialMessagesHandled = true
                 lastSoundedMessageId = messages.last().id
@@ -366,18 +380,16 @@ fun ChatScreenV2(
                 }
             }
 
-            val lastVisibleIndex =
-                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-            val total = listState.layoutInfo.totalItemsCount
-
-            val isNearBottom = lastVisibleIndex >= total - 2
-            if (isNearBottom) {
+            // Only auto-scroll if the user is already near the bottom.
+            // If the user is scrolling up to read history, we don't fight them.
+            if (isAtBottom) {
                 scope.launch {
                     listState.animateScrollToItem(messages.lastIndex)
                 }
             }
         }
     }
+
 
     // Pagination: load older messages when scrolled to top
     LaunchedEffect(listState) {
