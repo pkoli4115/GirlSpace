@@ -8,6 +8,10 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -146,6 +150,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
+// Shared formatter for chat timestamps (HH:mm)
+private val CHAT_TIME_FORMATTER: SimpleDateFormat =
+    SimpleDateFormat("HH:mm", Locale.getDefault())
 
 // Local-only types (different names to avoid clashes with Old_ChatScreen.kt)
 private enum class V2PermissionType {
@@ -359,6 +366,7 @@ fun ChatScreenV2(
         }
     }
 
+
     // Auto-scroll to bottom for new messages if user is already near bottom
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -389,7 +397,6 @@ fun ChatScreenV2(
             }
         }
     }
-
 
     // Pagination: load older messages when scrolled to top
     LaunchedEffect(listState) {
@@ -1692,7 +1699,7 @@ fun ChatScreenV2(
                     }
                     vm.clearScrollRequest()
                 }
-        // Typing indicator
+                // Typing indicator
                 AnimatedVisibility(visible = isTyping) {
                     Text(
                         text = "Typing…",
@@ -2348,7 +2355,6 @@ private val ChatMessage.voiceDurationLabel: String?
 /* ─────────────────────────────
    Message bubble with media + reactions + special payloads
    ───────────────────────────── */
-
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatMessageBubbleV2(
@@ -2369,10 +2375,20 @@ private fun ChatMessageBubbleV2(
 ) {
     val context = LocalContext.current
 
+    // ✅ Keep latest values without forcing a full recomposition of stable parts
+    val updatedIsSelected by rememberUpdatedState(isSelected)
+    val updatedIsHighlighted by rememberUpdatedState(isHighlighted)
+    val updatedShowReactions by rememberUpdatedState(showReactionStrip)
+    val updatedIsPlaying by rememberUpdatedState(isPlayingAudio)
+
     val senderName = message.senderName.ifBlank { "GirlSpace user" }
-    val sdf = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
-    val timeText = remember(message.createdAt) {
-        message.createdAt.let { sdf.format(it.toDate()) }
+
+    // ✅ Shared formatter, not recreated per bubble
+    val sdf = CHAT_TIME_FORMATTER
+
+    // ✅ Time string computed once per message id
+    val timeText by remember(message.id) {
+        mutableStateOf(sdf.format(message.createdAt.toDate()))
     }
 
     val seenByOther = remember(message.readBy, message.senderId, currentUserId) {
@@ -2390,8 +2406,8 @@ private fun ChatMessageBubbleV2(
     }
 
     val bgColor = when {
-        isSelected -> baseColor.copy(alpha = 0.5f)
-        isHighlighted -> baseColor.copy(alpha = 0.8f)
+        updatedIsSelected -> baseColor.copy(alpha = 0.5f)
+        updatedIsHighlighted -> baseColor.copy(alpha = 0.8f)
         else -> baseColor
     }
 
@@ -2404,6 +2420,9 @@ private fun ChatMessageBubbleV2(
         else null
     }
 
+    // ✅ Cache reactions for this message id (don’t re-read on every small state change)
+    val reactions = remember(message.id) { message.reactions }
+
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
@@ -2411,7 +2430,7 @@ private fun ChatMessageBubbleV2(
         Column(
             modifier = Modifier.widthIn(max = 320.dp)
         ) {
-            AnimatedVisibility(visible = showReactionStrip) {
+            AnimatedVisibility(visible = updatedShowReactions) {
                 ReactionBar(
                     modifier = Modifier
                         .padding(bottom = 4.dp)
@@ -2492,7 +2511,7 @@ private fun ChatMessageBubbleV2(
                         )
                     }
                 }
-// SPECIAL: Contact
+                // SPECIAL: Contact
                 else if (message.mediaType == "contact") {
 
                     val name = message.contactName ?: "Contact"
@@ -2547,7 +2566,6 @@ private fun ChatMessageBubbleV2(
                         )
                     }
                 }
-
                 // MEDIA
                 else if (message.mediaUrl != null && message.mediaType != null) {
                     when (message.mediaType) {
@@ -2578,7 +2596,7 @@ private fun ChatMessageBubbleV2(
                                 modifier = Modifier.clickable { onAudioClick() }
                             ) {
                                 Text(
-                                    text = if (isPlayingAudio) "⏸" else "▶",
+                                    text = if (updatedIsPlaying) "⏸" else "▶",
                                     style = MaterialTheme.typography.bodyLarge,
                                     color = if (mine) Color.White else MaterialTheme.colorScheme.onSurface
                                 )
@@ -2693,12 +2711,12 @@ private fun ChatMessageBubbleV2(
                 }
             }
 
-            AnimatedVisibility(visible = message.reactions.isNotEmpty()) {
+            AnimatedVisibility(visible = reactions.isNotEmpty()) {
                 Row(
                     modifier = Modifier.padding(top = 4.dp),
                     horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start
                 ) {
-                    message.reactions.values.forEach { emoji ->
+                    reactions.values.forEach { emoji: String ->
                         Text(
                             text = emoji,
                             style = MaterialTheme.typography.bodyLarge,
@@ -2710,6 +2728,7 @@ private fun ChatMessageBubbleV2(
         }
     }
 }
+
 
 /* ─────────────────────────────
    Reply preview above composer
