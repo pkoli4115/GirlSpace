@@ -1,6 +1,8 @@
 package com.girlspace.app.ui.feed
 import androidx.compose.foundation.layout.width
 import android.util.Log
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.compose.runtime.collectAsState
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -65,6 +67,8 @@ fun SavedPostsScreen(
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     val firestore = remember { FirebaseFirestore.getInstance() }
+    val styleVm: FeedStyleViewModel = hiltViewModel()
+    val feedVibe by styleVm.currentVibe.collectAsState()
 
     var items by remember { mutableStateOf<List<SavedPostPreview>>(emptyList()) }
 
@@ -329,8 +333,7 @@ fun SavedPostsScreen(
                                                             .document(targetUid)
                                                             .collection("followers")
                                                             .document(uid)
-
-                                                        val userDoc = firestore.collection("users").document(uid)
+                                                                                                             val userDoc = firestore.collection("users").document(uid)
                                                         val targetDoc = firestore.collection("users").document(targetUid)
 
                                                         val currentlyFollowing = followingIds.contains(targetUid)
@@ -391,7 +394,8 @@ fun SavedPostsScreen(
                                                     },
                                                     onOpenMedia = { _, _ ->
                                                         // For now we keep media handling simple here.
-                                                    }
+                                                    },
+                                                    feedVibe = feedVibe
                                                 )
                                             }
                                         }

@@ -18,8 +18,12 @@ sealed class FeedItem {
 
     /** Normal post (your existing Post model) */
     data class PostItem(
-        val post: Post
-    ) : FeedItem() {
+        val post: Post,
+        val postId: String = "",
+        val likedBy: List<String> = emptyList(),
+        val likeCount: Int = 0,
+
+        ) : FeedItem() {
         override val key: String = "post_${post.postId}"
     }
 

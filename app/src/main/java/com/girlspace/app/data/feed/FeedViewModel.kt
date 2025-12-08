@@ -1,5 +1,5 @@
 package com.girlspace.app.ui.feed
-
+import com.google.firebase.firestore.FieldValue
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -42,6 +42,9 @@ class FeedViewModel : ViewModel() {
 
     private val _isPaging = MutableStateFlow(false)
     val isPaging: StateFlow<Boolean> = _isPaging
+    private val auth: FirebaseAuth = FirebaseAuth.getInstance()
+
+    // feed items backing state
 
     private val _hasMore = MutableStateFlow(true)
     val hasMore: StateFlow<Boolean> = _hasMore
@@ -141,8 +144,57 @@ class FeedViewModel : ViewModel() {
     // ------------------------------------------------------------------------
 
     fun toggleLike(post: Post) {
-        repo.toggleLike(post)
+        val uid = auth.currentUser?.uid ?: return
+        val postId = post.postId
+
+        // 1) Optimistic UI update – instant local change
+        val currentlyLiked = post.likedBy.contains(uid)
+
+        _feedItems.value = _feedItems.value.map { item ->
+            if (item is FeedItem.PostItem && item.post.postId == postId) {
+                val newLikedBy = if (currentlyLiked) {
+                    item.post.likedBy.filterNot { it == uid }
+                } else {
+                    item.post.likedBy + uid
+                }
+
+                val newLikeCount = (item.post.likeCount ?: 0) +
+                        if (currentlyLiked) -1 else 1
+
+                item.copy(
+                    post = item.post.copy(
+                        likedBy = newLikedBy,
+                        likeCount = newLikeCount.coerceAtLeast(0)
+                    )
+                )
+            } else {
+                item
+            }
+        }
+
+        // 2) Firestore update in background – real source of truth
+        val postRef = firestore.collection("posts").document(postId)
+
+        val likeUpdate = if (currentlyLiked) {
+            mapOf(
+                "likedBy" to FieldValue.arrayRemove(uid),
+                "likeCount" to FieldValue.increment(-1)
+            )
+        } else {
+            mapOf(
+                "likedBy" to FieldValue.arrayUnion(uid),
+                "likeCount" to FieldValue.increment(1)
+            )
+        }
+
+        postRef.update(likeUpdate)
+            .addOnFailureListener { e ->
+                // Optional: roll back optimistic change on failure
+                // or just log for now
+                e.printStackTrace()
+            }
     }
+
 
     fun deletePost(post: Post, onDone: (Boolean) -> Unit) {
         _isLoading.value = true

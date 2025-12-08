@@ -7,6 +7,8 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import com.facebook.CallbackManager
 import com.girlspace.app.ui.GirlSpaceApp
 import com.girlspace.app.ui.onboarding.OnboardingViewModel
@@ -26,7 +28,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // The SDK reads ApplicationId from manifest automatically.
+        // 🔹 Tell Android: don't reserve space for system bars, let us draw edge-to-edge
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        // 🔹 Make status bar icons dark on light backgrounds (like Facebook)
+        WindowInsetsControllerCompat(window, window.decorView).isAppearanceLightStatusBars = true
+
         setContent {
             // Get current vibe from DataStore via OnboardingViewModel
             val onboardingViewModel: OnboardingViewModel = hiltViewModel()
