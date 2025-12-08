@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -46,8 +47,8 @@ import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
-import java.text.SimpleDateFormat
 import java.util.Locale
+import java.text.SimpleDateFormat
 
 data class SavedPostPreview(
     val postId: String = "",
@@ -57,11 +58,6 @@ data class SavedPostPreview(
     val savedAtMillis: Long? = null
 )
 
-/**
- * Saved posts screen:
- * - Shows list of saved post previews
- * - Tapping a row opens a full-screen PostCard with full interactions
- */
 @Composable
 fun SavedPostsScreen(
     onBack: () -> Unit
@@ -72,16 +68,19 @@ fun SavedPostsScreen(
 
     var items by remember { mutableStateOf<List<SavedPostPreview>>(emptyList()) }
 
-    // For full-screen post view
+    // Selected post overlay state
     var selectedPostId by remember { mutableStateOf<String?>(null) }
     var selectedPost by remember { mutableStateOf<Post?>(null) }
     var selectedIsSaved by remember { mutableStateOf(false) }
     var isLoadingPost by remember { mutableStateOf(false) }
     var postError by remember { mutableStateOf<String?>(null) }
 
+    // Following for this user
+    var followingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
     val feedVm: FeedViewModel = viewModel()
 
-    // Listen to saved posts collection
+    // Listen to saved posts list
     DisposableEffect(user?.uid) {
         if (user == null) {
             Log.w("SavedPosts", "No user logged in")
@@ -114,15 +113,32 @@ fun SavedPostsScreen(
         onDispose { reg.remove() }
     }
 
-    // When a specific saved row is tapped, listen to that post + its saved status
+    // Listen to following list
+    DisposableEffect(user?.uid) {
+        var reg: ListenerRegistration? = null
+        val uid = user?.uid
+        if (uid != null) {
+            reg = firestore.collection("users")
+                .document(uid)
+                .collection("following")
+                .addSnapshotListener { snap, err ->
+                    if (err != null) return@addSnapshotListener
+                    val ids = snap?.documents?.map { it.id }?.toSet() ?: emptySet()
+                    followingIds = ids
+                }
+        }
+        onDispose { reg?.remove() }
+    }
+
+    // Listen to a selected post + its saved status
     DisposableEffect(selectedPostId, user?.uid) {
         val postId = selectedPostId
         val uid = user?.uid
         if (postId == null || uid == null) {
             selectedPost = null
+            selectedIsSaved = false
             postError = null
             isLoadingPost = false
-            selectedIsSaved = false
             return@DisposableEffect onDispose { }
         }
 
@@ -147,16 +163,15 @@ fun SavedPostsScreen(
             if (snap != null && snap.exists()) {
                 val p = snap.toObject(Post::class.java)
                 if (p != null) {
-                    // Ensure postId field is filled
                     selectedPost = p.copy(postId = snap.id)
                     postError = null
                 } else {
-                    postError = "Post not found."
                     selectedPost = null
+                    postError = "Post not found."
                 }
             } else {
-                postError = "Post not found."
                 selectedPost = null
+                postError = "Post not found."
             }
             isLoadingPost = false
         }
@@ -225,7 +240,7 @@ fun SavedPostsScreen(
                 }
             }
 
-            // Full-screen post view overlay when a saved post is selected
+            // Full-screen post overlay
             selectedPostId?.let { _ ->
                 Surface(
                     modifier = Modifier
@@ -242,7 +257,6 @@ fun SavedPostsScreen(
                                 .fillMaxSize()
                                 .background(MaterialTheme.colorScheme.background)
                         ) {
-                            // Mini top bar
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -273,7 +287,7 @@ fun SavedPostsScreen(
                                             modifier = Modifier.fillMaxSize(),
                                             contentAlignment = Alignment.Center
                                         ) {
-                                            androidx.compose.material3.CircularProgressIndicator()
+                                            CircularProgressIndicator()
                                         }
                                     }
 
@@ -285,26 +299,68 @@ fun SavedPostsScreen(
                                         )
                                     }
 
-                                    selectedPost != null -> {
-                                        // Reuse the main feed PostCard UI
+                                    selectedPost != null && user != null -> {
+                                        val p = selectedPost!!
+                                        val isFollowingAuthor =
+                                            p.uid.isNotBlank() &&
+                                                    p.uid != user.uid &&
+                                                    followingIds.contains(p.uid)
+
                                         LazyColumn(
                                             modifier = Modifier.fillMaxSize()
                                         ) {
                                             item {
                                                 PostCard(
-                                                    post = selectedPost!!,
-                                                    currentUserId = user?.uid,          // ✅ user is nullable, PostCard accepts String?
+                                                    post = p,
+                                                    currentUserId = user.uid,
                                                     isSaved = selectedIsSaved,
-                                                    onLike = { feedVm.toggleLike(selectedPost!!) },
+                                                    isFollowing = isFollowingAuthor,
+                                                    onToggleFollow = {
+                                                        val uid = user.uid
+                                                        val targetUid = p.uid
+                                                        if (targetUid.isBlank() || uid == targetUid) return@PostCard
+
+                                                        val followingRef = firestore.collection("users")
+                                                            .document(uid)
+                                                            .collection("following")
+                                                            .document(targetUid)
+
+                                                        val followersRef = firestore.collection("users")
+                                                            .document(targetUid)
+                                                            .collection("followers")
+                                                            .document(uid)
+
+                                                        val userDoc = firestore.collection("users").document(uid)
+                                                        val targetDoc = firestore.collection("users").document(targetUid)
+
+                                                        val currentlyFollowing = followingIds.contains(targetUid)
+
+                                                        if (currentlyFollowing) {
+                                                            followingRef.delete()
+                                                            followersRef.delete()
+                                                            userDoc.update("followingCount", FieldValue.increment(-1))
+                                                            targetDoc.update("followersCount", FieldValue.increment(-1))
+                                                        } else {
+                                                            val data = mapOf(
+                                                                "userId" to uid,
+                                                                "targetId" to targetUid,
+                                                                "createdAt" to FieldValue.serverTimestamp()
+                                                            )
+                                                            followingRef.set(data, SetOptions.merge())
+                                                            followersRef.set(data, SetOptions.merge())
+                                                            userDoc.update("followingCount", FieldValue.increment(1))
+                                                            targetDoc.update("followersCount", FieldValue.increment(1))
+                                                        }
+                                                    },
+                                                    onLike = { feedVm.toggleLike(p) },
                                                     onDelete = {
-                                                        feedVm.deletePost(selectedPost!!) {
-                                                            // After delete, close and refresh list automatically
+                                                        feedVm.deletePost(p) {
                                                             selectedPostId = null
                                                         }
                                                     },
                                                     onToggleSave = {
-                                                        val uid = user?.uid ?: return@PostCard   // ✅ early return if user is null
-                                                        val postId = selectedPost!!.postId
+                                                        val uid = user.uid
+                                                        val postId = p.postId
                                                         val savedRef = firestore.collection("users")
                                                             .document(uid)
                                                             .collection("savedPosts")
@@ -316,12 +372,12 @@ fun SavedPostsScreen(
                                                                     Log.e("SavedPosts", "Failed to unsave", it)
                                                                 }
                                                         } else {
-                                                            val previewImage = selectedPost!!.imageUrls.firstOrNull()
+                                                            val previewImage = p.imageUrls.firstOrNull()
                                                             val data = mapOf(
                                                                 "postId" to postId,
-                                                                "authorId" to selectedPost!!.uid,
+                                                                "authorId" to p.uid,
                                                                 "savedAt" to FieldValue.serverTimestamp(),
-                                                                "previewText" to selectedPost!!.text.take(140),
+                                                                "previewText" to p.text.take(140),
                                                                 "previewImage" to previewImage
                                                             )
                                                             savedRef.set(data, SetOptions.merge())
@@ -331,10 +387,10 @@ fun SavedPostsScreen(
                                                         }
                                                     },
                                                     onComment = { text ->
-                                                        feedVm.addComment(selectedPost!!.postId, text)
+                                                        feedVm.addComment(p.postId, text)
                                                     },
                                                     onOpenMedia = { _, _ ->
-                                                        // For now we rely on Feed-style overlay; you can plug a media viewer here later if you want.
+                                                        // For now we keep media handling simple here.
                                                     }
                                                 )
                                             }

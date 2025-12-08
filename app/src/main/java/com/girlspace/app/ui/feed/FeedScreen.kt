@@ -70,9 +70,9 @@ import coil.compose.AsyncImage
 import com.girlspace.app.core.plan.PlanLimitsRepository
 import com.girlspace.app.data.feed.Comment
 import com.girlspace.app.ui.feed.FeedItem
+import com.girlspace.app.ui.feed.MediaPrefetcher
 import com.girlspace.app.data.feed.Post
 import com.girlspace.app.ui.feed.TopPicksRow
-import com.girlspace.app.ui.feed.MediaPrefetcher
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
@@ -102,14 +102,12 @@ fun FeedScreen(
 
     val auth = remember { FirebaseAuth.getInstance() }
     val currentUser = auth.currentUser
-    val context = LocalContext.current
     val firestore = remember { FirebaseFirestore.getInstance() }
+    val context = LocalContext.current
 
     val listState = rememberLazyListState()
 
-    // ------------------------------------------------------------------------
-    // Saved posts – users/{uid}/savedPosts/{postId}
-    // ------------------------------------------------------------------------
+    // Saved posts for this user
     var savedPostIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     DisposableEffect(currentUser?.uid) {
@@ -126,6 +124,28 @@ fun FeedScreen(
                         ?.toSet()
                         ?: emptySet()
                     savedPostIds = ids
+                }
+        }
+        onDispose { registration?.remove() }
+    }
+
+    // Following set for this user
+    var followingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    DisposableEffect(currentUser?.uid) {
+        var registration: ListenerRegistration? = null
+        val uid = currentUser?.uid
+        if (uid != null) {
+            registration = firestore.collection("users")
+                .document(uid)
+                .collection("following")
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) return@addSnapshotListener
+                    val ids = snapshot?.documents
+                        ?.map { it.id }
+                        ?.toSet()
+                        ?: emptySet()
+                    followingIds = ids
                 }
         }
         onDispose { registration?.remove() }
@@ -173,7 +193,7 @@ fun FeedScreen(
                 state = listState,
                 contentPadding = PaddingValues(bottom = 80.dp)
             ) {
-                // "What's on your mind today?" composer prompt
+                // Top composer card
                 item(key = "composer_prompt") {
                     WhatsOnYourMindRow(
                         userName = currentUser?.displayName,
@@ -198,19 +218,67 @@ fun FeedScreen(
                         }
 
                         is FeedItem.PostItem -> {
-                            val isSaved = savedPostIds.contains(item.post.postId)
+                            val post = item.post
+                            val authorUid = post.uid
+                            val isSaved = savedPostIds.contains(post.postId)
+                            val isFollowingAuthor =
+                                currentUser?.uid != null &&
+                                        authorUid.isNotBlank() &&
+                                        authorUid != currentUser.uid &&
+                                        followingIds.contains(authorUid)
+
                             PostCard(
-                                post = item.post,
+                                post = post,
                                 currentUserId = currentUser?.uid,
                                 isSaved = isSaved,
-                                onLike = { vm.toggleLike(item.post) },
-                                onDelete = { vm.deletePost(item.post) { } },
+                                isFollowing = isFollowingAuthor,
+                                onToggleFollow = {
+                                    val uid = currentUser?.uid
+                                    val targetUid = authorUid
+                                    if (uid == null || targetUid.isBlank() || uid == targetUid) return@PostCard
+
+                                    val followingRef = firestore.collection("users")
+                                        .document(uid)
+                                        .collection("following")
+                                        .document(targetUid)
+
+                                    val followersRef = firestore.collection("users")
+                                        .document(targetUid)
+                                        .collection("followers")
+                                        .document(uid)
+
+                                    val userDoc = firestore.collection("users").document(uid)
+                                    val targetDoc = firestore.collection("users").document(targetUid)
+
+                                    val currentlyFollowing = followingIds.contains(targetUid)
+
+                                    if (currentlyFollowing) {
+                                        // Unfollow
+                                        followingRef.delete()
+                                        followersRef.delete()
+                                        userDoc.update("followingCount", FieldValue.increment(-1))
+                                        targetDoc.update("followersCount", FieldValue.increment(-1))
+                                    } else {
+                                        // Follow
+                                        val data = mapOf(
+                                            "userId" to uid,
+                                            "targetId" to targetUid,
+                                            "createdAt" to FieldValue.serverTimestamp()
+                                        )
+                                        followingRef.set(data, SetOptions.merge())
+                                        followersRef.set(data, SetOptions.merge())
+                                        userDoc.update("followingCount", FieldValue.increment(1))
+                                        targetDoc.update("followersCount", FieldValue.increment(1))
+                                    }
+                                },
+                                onLike = { vm.toggleLike(post) },
+                                onDelete = { vm.deletePost(post) { } },
                                 onToggleSave = {
                                     val uid = currentUser?.uid ?: return@PostCard
                                     val savedRef = firestore.collection("users")
                                         .document(uid)
                                         .collection("savedPosts")
-                                        .document(item.post.postId)
+                                        .document(post.postId)
 
                                     if (isSaved) {
                                         savedRef.delete()
@@ -222,12 +290,12 @@ fun FeedScreen(
                                                 ).show()
                                             }
                                     } else {
-                                        val previewImage = item.post.imageUrls.firstOrNull()
+                                        val previewImage = post.imageUrls.firstOrNull()
                                         val data = mapOf(
-                                            "postId" to item.post.postId,
-                                            "authorId" to item.post.uid,
+                                            "postId" to post.postId,
+                                            "authorId" to post.uid,
                                             "savedAt" to FieldValue.serverTimestamp(),
-                                            "previewText" to item.post.text.take(140),
+                                            "previewText" to post.text.take(140),
                                             "previewImage" to previewImage
                                         )
                                         savedRef.set(data, SetOptions.merge())
@@ -241,7 +309,7 @@ fun FeedScreen(
                                     }
                                 },
                                 onComment = { text ->
-                                    vm.addComment(item.post.postId, text)
+                                    vm.addComment(post.postId, text)
                                 },
                                 onOpenMedia = { urls, index ->
                                     mediaViewerState = MediaViewerState(urls, index)
@@ -276,7 +344,6 @@ fun FeedScreen(
             }
         }
 
-        // Error dialog
         if (errorMessage != null) {
             AlertDialog(
                 onDismissRequest = { vm.clearError() },
@@ -290,7 +357,6 @@ fun FeedScreen(
             )
         }
 
-        // Premium required dialog
         if (premiumRequired) {
             AlertDialog(
                 onDismissRequest = { vm.clearPremiumRequired() },
@@ -310,7 +376,6 @@ fun FeedScreen(
             )
         }
 
-        // Create post overlay
         if (isCreatePostOpen) {
             Surface(
                 modifier = Modifier
@@ -332,7 +397,6 @@ fun FeedScreen(
             }
         }
 
-        // Fullscreen media viewer
         mediaViewerState?.let { state ->
             MediaViewerOverlay(
                 urls = state.urls,
@@ -364,7 +428,6 @@ private fun WhatsOnYourMindRow(
                 .padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Simple circle avatar with initial
             Surface(
                 modifier = Modifier.size(36.dp),
                 color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
@@ -550,10 +613,12 @@ fun ErrorRow(message: String) {
    ========================================================================== */
 
 @Composable
- fun PostCard(
+fun PostCard(
     post: Post,
     currentUserId: String?,
     isSaved: Boolean,
+    isFollowing: Boolean,
+    onToggleFollow: () -> Unit,
     onLike: () -> Unit,
     onDelete: () -> Unit,
     onToggleSave: () -> Unit,
@@ -573,10 +638,9 @@ fun ErrorRow(message: String) {
     var showMoreMenu by remember { mutableStateOf(false) }
     var showCommentBox by remember(post.postId) { mutableStateOf(false) }
     var commentText by remember(post.postId) { mutableStateOf("") }
-    var isFollowing by remember(post.uid) { mutableStateOf(false) }
     var comments by remember(post.postId) { mutableStateOf<List<Comment>>(emptyList()) }
 
-    // When comment box is opened, start listening for comments for this post
+    // Comments listener when box is open
     DisposableEffect(showCommentBox, post.postId) {
         if (!showCommentBox) {
             comments = emptyList()
@@ -649,7 +713,7 @@ fun ErrorRow(message: String) {
             }
 
             if (currentUserId != null && currentUserId != post.uid) {
-                TextButton(onClick = { isFollowing = !isFollowing }) {
+                TextButton(onClick = onToggleFollow) {
                     Text(
                         text = if (isFollowing) "Following" else "Follow",
                         style = MaterialTheme.typography.labelLarge,
@@ -809,7 +873,6 @@ fun ErrorRow(message: String) {
         }
 
         if (showCommentBox) {
-            // Comments list
             if (comments.isNotEmpty()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Column(
