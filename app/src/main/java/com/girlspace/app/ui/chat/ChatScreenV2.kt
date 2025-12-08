@@ -255,7 +255,13 @@ fun ChatScreenV2(
     var cameraImageUri by remember { mutableStateOf<Uri?>(null) }
 
     // WA-style: selection mode (IDs of selected messages)
+// WA-style: selection mode (IDs of selected messages)
     var selectedMessageIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+// Derived flag so we don’t keep checking .isNotEmpty() everywhere
+    val isSelectionMode by remember(selectedMessageIds) {
+        mutableStateOf(selectedMessageIds.isNotEmpty())
+    }
 
     // Batch-7: in-chat search
     var showSearchBar by remember { mutableStateOf(false) }
@@ -350,6 +356,7 @@ fun ChatScreenV2(
     }
 
     val listState = rememberLazyListState()
+    var hasDoneInitialScroll by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val focusRequester = remember { FocusRequester() }
 
@@ -368,9 +375,10 @@ fun ChatScreenV2(
 
 
     // Auto-scroll to bottom for new messages if user is already near bottom
+
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
-            // Bee sound for new incoming messages (existing behavior preserved)
+            // Bee sound for new incoming messages
             if (!initialMessagesHandled) {
                 initialMessagesHandled = true
                 lastSoundedMessageId = messages.last().id
@@ -388,9 +396,20 @@ fun ChatScreenV2(
                 }
             }
 
-            // Only auto-scroll if the user is already near the bottom.
-            // If the user is scrolling up to read history, we don't fight them.
-            if (isAtBottom) {
+            val lastVisibleIndex =
+                listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+            val total = listState.layoutInfo.totalItemsCount
+
+            val isNearBottom = lastVisibleIndex >= total - 2
+
+            if (!hasDoneInitialScroll) {
+                // First time: jump instantly to bottom (no animation cost)
+                hasDoneInitialScroll = true
+                scope.launch {
+                    listState.scrollToItem(messages.lastIndex)
+                }
+            } else if (isNearBottom) {
+                // Later: smooth scroll as before
                 scope.launch {
                     listState.animateScrollToItem(messages.lastIndex)
                 }
@@ -1405,7 +1424,7 @@ fun ChatScreenV2(
 
     Scaffold(
         topBar = {
-            if (selectedMessageIds.isEmpty()) {
+            if (!isSelectionMode) {
                 // Gradient wrapper around existing ChatTopBarV2 – logic unchanged
                 Box(
                     modifier = Modifier.background(
@@ -1581,7 +1600,14 @@ fun ChatScreenV2(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     state = listState
                 ) {
-                    items(messages, key = { it.id }) { msg ->
+                    items(
+                        items = messages,
+                        key = { it.id },
+                        contentType = { msg ->
+                            // Hint to Compose so it can reuse views more smartly
+                            msg.mediaType ?: "text"
+                        }
+                    ) { msg ->
                         val mine = msg.senderId == currentUid
                         val isSelected = selectedMessageIds.contains(msg.id)
                         val isHighlighted = (msg.id == highlightedMessageId)
@@ -1605,7 +1631,7 @@ fun ChatScreenV2(
                                 showReactionStrip = (selectedMsgForReaction == msg.id),
                                 isPlayingAudio = (msg.id == currentlyPlayingId),
                                 onClick = {
-                                    if (selectedMessageIds.isNotEmpty()) {
+                                    if (isSelectionMode) {
                                         // Toggle selection
                                         selectedMessageIds =
                                             if (isSelected) selectedMessageIds - msg.id
@@ -1799,7 +1825,9 @@ fun ChatScreenV2(
 
                     Spacer(modifier = Modifier.width(4.dp))
 
-                    val canSend = inputText.isNotBlank() || attachedMedia.isNotEmpty()
+                    val canSend by remember(inputText, attachedMedia.size) {
+                        mutableStateOf(inputText.isNotBlank() || attachedMedia.isNotEmpty())
+                    }
 
                     // Quick-like (thumbs-up)
                     if (!canSend && !isRecording) {
@@ -2570,13 +2598,22 @@ private fun ChatMessageBubbleV2(
                 else if (message.mediaUrl != null && message.mediaType != null) {
                     when (message.mediaType) {
                         "image" -> {
+                            val context = LocalContext.current
+                            val imageRequest = remember(message.id, message.mediaUrl) {
+                                coil.request.ImageRequest.Builder(context)
+                                    .data(message.mediaUrl)
+                                    .crossfade(false) // smoother in long lists; no fade cost
+                                    .build()
+                            }
+
                             AsyncImage(
-                                model = message.mediaUrl,
+                                model = imageRequest,
                                 contentDescription = "Image",
                                 modifier = Modifier
                                     .widthIn(max = 220.dp)
                                     .height(220.dp)
-                                    .clip(RoundedCornerShape(12.dp))
+                                    .clip(RoundedCornerShape(12.dp)),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                         }
