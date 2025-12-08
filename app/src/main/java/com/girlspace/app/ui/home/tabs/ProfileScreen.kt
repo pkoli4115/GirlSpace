@@ -70,6 +70,7 @@ fun ProfileScreen(
     // Onboarding / theme ViewModel for vibe changes
     val onboardingViewModel: OnboardingViewModel = hiltViewModel()
     val currentThemeMode by onboardingViewModel.themeMode.collectAsState()
+    var savedCount by remember { mutableStateOf(0) }
 
     var name by remember { mutableStateOf("") }
     var email by remember { mutableStateOf("") }
@@ -119,6 +120,18 @@ fun ProfileScreen(
                 val storedVibe = doc.getString("vibeKey")
                 vibeKey = storedVibe ?: currentThemeMode
             }
+        FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(uid)
+            .collection("savedPosts")
+            .addSnapshotListener { savedSnap, savedErr ->
+                if (savedErr != null) {
+                    Log.e("Togetherly", "Saved posts listen failed", savedErr)
+                    return@addSnapshotListener
+                }
+                savedCount = savedSnap?.size() ?: 0
+            }
+
     }
 
     // --- Vibe UI helpers ---
@@ -343,6 +356,40 @@ fun ProfileScreen(
                 }
                 Text(
                     text = "Change",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(16.dp))
+
+// Saved posts row
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { navController.navigate("savedPosts") }
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "Saved posts",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (savedCount == 0) "No saved posts yet" else "$savedCount saved",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+                Text(
+                    text = "View",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.SemiBold

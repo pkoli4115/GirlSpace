@@ -201,16 +201,7 @@ fun HomeRoot(
                 )
             }
         },
-        floatingActionButton = {
-            if (currentTab == HomeTab.Feed) {
-                FloatingActionButton(
-                    onClick = { showCreatePost = true }
-                ) {
-                    Icon(Icons.Filled.Add, contentDescription = "Create post")
-                }
-            }
-        }
-    ) { padding ->
+      ) { padding ->
         Box(
             modifier = Modifier
                 .padding(padding)
@@ -223,8 +214,10 @@ fun HomeRoot(
                 when (HomeTab.values()[page]) {
                     HomeTab.Feed -> FeedScreen(
                         isCreatePostOpen = showCreatePost,
-                        onDismissCreatePost = { showCreatePost = false }
+                        onDismissCreatePost = { showCreatePost = false },
+                        onOpenCreatePost = { showCreatePost = true }
                     )
+
 
                     HomeTab.Reels -> ReelsTab()
 

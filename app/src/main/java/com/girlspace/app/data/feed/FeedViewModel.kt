@@ -21,14 +21,30 @@ import kotlinx.coroutines.withContext
 
 class FeedViewModel : ViewModel() {
 
+    private val firestore = FirebaseFirestore.getInstance()
     private val repo = FeedRepository(
         auth = FirebaseAuth.getInstance(),
-        firestore = FirebaseFirestore.getInstance(),
+        firestore = firestore,
         storage = FirebaseStorage.getInstance()
     )
+    private val engine = FeedEngine(firestore)
 
+    // Mixed feed items (posts + reels + ads + top picks + evergreen)
+    private val _feedItems = MutableStateFlow<List<FeedItem>>(emptyList())
+    val feedItems: StateFlow<List<FeedItem>> = _feedItems
+
+    // For compatibility (if any other place still uses posts)
     private val _posts = MutableStateFlow<List<Post>>(emptyList())
     val posts: StateFlow<List<Post>> = _posts
+
+    private val _isInitialLoading = MutableStateFlow(false)
+    val isInitialLoading: StateFlow<Boolean> = _isInitialLoading
+
+    private val _isPaging = MutableStateFlow(false)
+    val isPaging: StateFlow<Boolean> = _isPaging
+
+    private val _hasMore = MutableStateFlow(true)
+    val hasMore: StateFlow<Boolean> = _hasMore
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
@@ -46,19 +62,71 @@ class FeedViewModel : ViewModel() {
     private val _currentMaxImages = MutableStateFlow(1)
     val currentMaxImages: StateFlow<Int> = _currentMaxImages
 
-    private var feedListener: com.google.firebase.firestore.ListenerRegistration? = null
-
     init {
-        observeFeed()
+        refresh()
     }
 
-    private fun observeFeed() {
-        _isLoading.value = true
-        feedListener = repo.observeFeed { list ->
-            _posts.value = list
-            _isLoading.value = false
+    // ------------------------------------------------------------------------
+    // FEED LOADING
+    // ------------------------------------------------------------------------
+
+    fun refresh() {
+        viewModelScope.launch {
+            _isInitialLoading.value = true
+            _hasMore.value = true
+            engine.resetPagination()
+            try {
+                val items = engine.loadInitialPage()
+                applyNewFeedItems(items)
+            } catch (e: Exception) {
+                Log.e("FeedViewModel", "refresh: failed", e)
+                _errorMessage.value = e.localizedMessage ?: "Failed to load feed"
+                _feedItems.value = emptyList()
+                _posts.value = emptyList()
+            } finally {
+                _isInitialLoading.value = false
+            }
         }
     }
+
+    fun loadNextPageIfNeeded() {
+        if (_isPaging.value || !_hasMore.value) return
+
+        viewModelScope.launch {
+            _isPaging.value = true
+            try {
+                val next = engine.loadNextPage()
+                if (next.isEmpty()) {
+                    _hasMore.value = false
+                } else {
+                    val combined = _feedItems.value + next
+                    val deduped = dedupeByKey(combined)
+                    applyNewFeedItems(deduped)
+                }
+            } catch (e: Exception) {
+                Log.e("FeedViewModel", "loadNextPage: failed", e)
+                _errorMessage.value = e.localizedMessage ?: "Failed to load more"
+            } finally {
+                _isPaging.value = false
+            }
+        }
+    }
+
+    private fun dedupeByKey(list: List<FeedItem>): List<FeedItem> {
+        val seen = mutableSetOf<String>()
+        return list.filter { seen.add(it.key) }
+    }
+
+    private fun applyNewFeedItems(items: List<FeedItem>) {
+        _feedItems.value = items
+        _posts.value = items
+            .filterIsInstance<FeedItem.PostItem>()
+            .map { it.post }
+    }
+
+    // ------------------------------------------------------------------------
+    // UI FLAGS
+    // ------------------------------------------------------------------------
 
     fun clearError() {
         _errorMessage.value = null
@@ -68,6 +136,10 @@ class FeedViewModel : ViewModel() {
         _premiumRequired.value = false
     }
 
+    // ------------------------------------------------------------------------
+    // ACTIONS
+    // ------------------------------------------------------------------------
+
     fun toggleLike(post: Post) {
         repo.toggleLike(post)
     }
@@ -76,6 +148,10 @@ class FeedViewModel : ViewModel() {
         _isLoading.value = true
         repo.deletePost(post) { ok ->
             _isLoading.value = false
+            if (ok) {
+                // Re-load feed to reflect deletion
+                refresh()
+            }
             onDone(ok)
         }
     }
@@ -144,10 +220,11 @@ class FeedViewModel : ViewModel() {
                     when (result) {
                         is CreatePostResult.Success -> {
                             onSuccessClose()
+                            // Reload feed to include new post
+                            refresh()
                         }
 
                         is CreatePostResult.PremiumRequired -> {
-                            // Currently not returned from repo; kept for safety.
                             _premiumRequired.value = true
                         }
 
@@ -162,9 +239,30 @@ class FeedViewModel : ViewModel() {
             }
         }
     }
+    fun addComment(postId: String, text: String) {
+        if (text.isBlank()) return
+
+        viewModelScope.launch {
+            _isLoading.value = true
+            try {
+                repo.addComment(postId, text) { ok ->
+                    _isLoading.value = false
+                    if (!ok) {
+                        _errorMessage.value = "Failed to add comment"
+                    } else {
+                        // Reload feed so commentsCount updates
+                        refresh()
+                    }
+                }
+            } catch (e: Exception) {
+                _isLoading.value = false
+                _errorMessage.value = e.localizedMessage ?: "Failed to add comment"
+            }
+        }
+    }
 
     override fun onCleared() {
         super.onCleared()
-        feedListener?.remove()
+        engine.resetPagination()
     }
 }

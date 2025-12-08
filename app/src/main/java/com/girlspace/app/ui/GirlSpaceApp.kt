@@ -1,5 +1,11 @@
 package com.girlspace.app.ui
 import com.girlspace.app.ui.chat.ChatViewModel
+import com.girlspace.app.ui.feed.SavedPostsScreen
+import com.girlspace.app.ui.home.HomeRoot
+import com.girlspace.app.ui.login.LoginScreen
+import com.girlspace.app.ui.onboarding.MoodOnboardingScreen
+import com.girlspace.app.ui.profile.DeleteAccountScreen
+import com.girlspace.app.ui.profile.ProfileScreen
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -140,6 +146,14 @@ fun GirlSpaceApp() {
                     onUpgrade = {
                         navController.navigate("premium")
                     }
+                )
+            }
+            /* ---------------------------------------------------
+                6b) SAVED POSTS SCREEN
+            ---------------------------------------------------- */
+            composable(route = "savedPosts") {
+                SavedPostsScreen(
+                    onBack = { navController.popBackStack() }
                 )
             }
 

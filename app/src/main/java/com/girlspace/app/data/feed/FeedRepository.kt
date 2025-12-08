@@ -1,4 +1,5 @@
 package com.girlspace.app.data.feed
+import com.girlspace.app.data.feed.Comment
 
 import android.graphics.Bitmap
 import android.util.Log
@@ -18,7 +19,7 @@ sealed class CreatePostResult {
     object Success : CreatePostResult()
     object PremiumRequired : CreatePostResult()
     data class Error(val message: String?) : CreatePostResult()
-}
+    }
 
 class FeedRepository(
     private val auth: FirebaseAuth,
@@ -328,6 +329,69 @@ class FeedRepository(
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "deletePost: failed to delete post", e)
+                onResult(false)
+            }
+    }
+    /**
+     * Add a comment to a post and increment commentsCount.
+     *
+     * Comments are stored in:
+     *  posts/{postId}/comments/{commentId}
+     */
+    fun addComment(
+        postId: String,
+        text: String,
+        onResult: (Boolean) -> Unit
+    ) {
+        val currentUser = auth.currentUser
+        if (currentUser == null) {
+            onResult(false)
+            return
+        }
+
+        if (text.isBlank()) {
+            onResult(false)
+            return
+        }
+
+        // Load user profile for name/photo
+        firestore.collection("users")
+            .document(currentUser.uid)
+            .get()
+            .addOnSuccessListener { doc ->
+                val name = doc.getString("name") ?: (currentUser.displayName ?: "GirlSpace user")
+                val photoUrl = doc.getString("photoUrl") ?: currentUser.photoUrl?.toString()
+
+                val commentRef = firestore.collection("posts")
+                    .document(postId)
+                    .collection("comments")
+                    .document()
+
+                val commentData = mapOf(
+                    "commentId" to commentRef.id,
+                    "uid" to currentUser.uid,
+                    "text" to text.trim(),
+                    "createdAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "authorName" to name,
+                    "authorPhoto" to photoUrl
+                )
+
+                // Write comment + increment commentsCount in a transaction
+                firestore.runTransaction { tx ->
+                    val postRef = firestore.collection("posts").document(postId)
+                    val postSnap = tx.get(postRef)
+                    val currentCount = postSnap.getLong("commentsCount") ?: 0L
+                    tx.set(commentRef, commentData)
+                    tx.update(postRef, "commentsCount", currentCount + 1)
+                }.addOnSuccessListener {
+                    onResult(true)
+                }.addOnFailureListener { e ->
+                    Log.e(TAG, "addComment: failed", e)
+                    onResult(false)
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "addComment: failed to load user profile", e)
                 onResult(false)
             }
     }
