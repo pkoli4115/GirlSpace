@@ -50,6 +50,11 @@ data class FriendsUiState(
     val searchResults: List<SearchResultUser> = emptyList(),
     val isSearchLoading: Boolean = false
 )
+enum class FriendsListMode {
+    FRIENDS,
+    FOLLOWERS,
+    FOLLOWING
+}
 
 @HiltViewModel
 class FriendsViewModel @Inject constructor(
@@ -62,7 +67,8 @@ class FriendsViewModel @Inject constructor(
     val uiState: StateFlow<FriendsUiState> = _uiState.asStateFlow()
 
     private var searchJob: Job? = null
-
+    private var contextUserId: String? = null
+    private var contextMode: FriendsListMode = FriendsListMode.FRIENDS
     init {
         observeFriends()
         observeIncoming()
@@ -70,18 +76,90 @@ class FriendsViewModel @Inject constructor(
         loadSuggestions()
         loadFollowing()
     }
+    /**
+     * Configure this screen when opened from a profile.
+     *
+     * @param profileUserId  user whose network we are viewing (null = current user / default)
+     * @param initialTabKey  "friends", "followers", or "following" from nav args
+     */
+    fun configureForProfile(profileUserId: String?, initialTabKey: String?) {
+        val mode = when (initialTabKey?.lowercase()) {
+            "followers" -> FriendsListMode.FOLLOWERS
+            "following" -> FriendsListMode.FOLLOWING
+            else -> FriendsListMode.FRIENDS
+        }
+
+        val currentUid = auth.currentUser?.uid
+
+        // If we’re opening in the normal “my friends” view, just reset context and let
+        // existing observers (observeFriends, observeIncoming, etc.) do their job.
+        if (profileUserId.isNullOrBlank() ||
+            (profileUserId == currentUid && mode == FriendsListMode.FRIENDS)
+        ) {
+            contextUserId = null
+            contextMode = FriendsListMode.FRIENDS
+            return
+        }
+
+        // Avoid duplicate re-loads if nothing changed
+        if (contextUserId == profileUserId && contextMode == mode) return
+
+        contextUserId = profileUserId
+        contextMode = mode
+
+        viewModelScope.launch {
+            _uiState.update { it.copy(isLoading = true, error = null) }
+
+            try {
+                val targetUid = profileUserId!!
+
+                // Load list according to mode
+                val friendsList: List<FriendUserSummary> = when (mode) {
+                    FriendsListMode.FRIENDS -> loadFriendsOf(targetUid)
+                    FriendsListMode.FOLLOWERS -> loadFollowersOf(targetUid)
+                    FriendsListMode.FOLLOWING -> loadFollowingOf(targetUid)
+                }
+
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        friends = friendsList
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        error = e.message ?: "Failed to load network"
+                    )
+                }
+            }
+        }
+    }
 
     // region Observers
 
     private fun observeFriends() {
         viewModelScope.launch {
             friendRepository.observeFriends().collect { list ->
-                _uiState.update { it.copy(friends = list) }
-                // Friends changed → suggestions ranking may change
-                loadSuggestions()
+                val currentUid = auth.currentUser?.uid
+
+                // Only auto-apply my own friends when:
+                //  - we are NOT in a "viewing other profile" context
+                //  - AND the current mode is FRIENDS
+                val shouldApplyMyFriends =
+                    (contextUserId == null || contextUserId == currentUid) &&
+                            contextMode == FriendsListMode.FRIENDS
+
+                if (shouldApplyMyFriends) {
+                    _uiState.update { it.copy(friends = list) }
+                    // Friends changed → suggestions ranking may change
+                    loadSuggestions()
+                }
             }
         }
     }
+
 
     private fun observeIncoming() {
         viewModelScope.launch {
@@ -420,6 +498,153 @@ class FriendsViewModel @Inject constructor(
                 )
             }
         }
+    }
+// --- Helpers for profile context ------------------------------------------------------
+
+    private suspend fun loadFriendsOf(userId: String): List<FriendUserSummary> {
+        // Basic block list for current user (if logged in)
+        val currentUid = auth.currentUser?.uid
+        val blockedIds: Set<String> = if (currentUid != null) {
+            try {
+                val snap = db.collection("blocked_users")
+                    .document(currentUid)
+                    .collection(currentUid)
+                    .get()
+                    .await()
+                snap.documents.map { it.id }.toSet()
+            } catch (_: Exception) {
+                emptySet()
+            }
+        } else {
+            emptySet()
+        }
+
+        val friendsSnap = db.collection("friends")
+            .document(userId)
+            .collection("list")
+            .orderBy("lastInteractionAt")
+            .get()
+            .await()
+
+        val friendIds = friendsSnap.documents
+            .mapNotNull { it.getString("friendUid") }
+            .filter { it !in blockedIds }
+
+        if (friendIds.isEmpty()) return emptyList()
+
+        val result = mutableListOf<FriendUserSummary>()
+        for (friendId in friendIds) {
+            try {
+                val userSnap = db.collection("users")
+                    .document(friendId)
+                    .get()
+                    .await()
+                if (!userSnap.exists()) continue
+
+                result += FriendUserSummary(
+                    uid = friendId,
+                    fullName = userSnap.getString("name")
+                        ?: userSnap.getString("fullName")
+                        ?: "",
+                    photoUrl = userSnap.getString("photoUrl")
+                )
+            } catch (_: Exception) {
+                // ignore individual failures
+            }
+        }
+        return result
+    }
+
+    private suspend fun loadFollowersOf(userId: String): List<FriendUserSummary> {
+        val currentUid = auth.currentUser?.uid
+        val blockedIds: Set<String> = if (currentUid != null) {
+            try {
+                val snap = db.collection("blocked_users")
+                    .document(currentUid)
+                    .collection(currentUid)
+                    .get()
+                    .await()
+                snap.documents.map { it.id }.toSet()
+            } catch (_: Exception) {
+                emptySet()
+            }
+        } else {
+            emptySet()
+        }
+
+        val followersSnap = db.collection("users")
+            .whereArrayContains("following", userId)
+            .limit(200)
+            .get()
+            .await()
+
+        return followersSnap.documents
+            .filter { doc ->
+                val uid = doc.id
+                uid != currentUid && uid !in blockedIds
+            }
+            .map { doc ->
+                FriendUserSummary(
+                    uid = doc.id,
+                    fullName = doc.getString("name")
+                        ?: doc.getString("fullName")
+                        ?: "",
+                    photoUrl = doc.getString("photoUrl")
+                )
+            }
+    }
+
+    private suspend fun loadFollowingOf(userId: String): List<FriendUserSummary> {
+        val currentUid = auth.currentUser?.uid
+        val blockedIds: Set<String> = if (currentUid != null) {
+            try {
+                val snap = db.collection("blocked_users")
+                    .document(currentUid)
+                    .collection(currentUid)
+                    .get()
+                    .await()
+                snap.documents.map { it.id }.toSet()
+            } catch (_: Exception) {
+                emptySet()
+            }
+        } else {
+            emptySet()
+        }
+
+        val userSnap = db.collection("users")
+            .document(userId)
+            .get()
+            .await()
+
+        val followingArray = userSnap.get("following") as? List<*>
+        val followingIds = followingArray
+            ?.filterIsInstance<String>()
+            ?.filter { it != currentUid && it !in blockedIds }
+            ?: emptyList()
+
+        if (followingIds.isEmpty()) return emptyList()
+
+        val result = mutableListOf<FriendUserSummary>()
+        for (followedId in followingIds) {
+            try {
+                val snap = db.collection("users")
+                    .document(followedId)
+                    .get()
+                    .await()
+                if (!snap.exists()) continue
+
+                result += FriendUserSummary(
+                    uid = followedId,
+                    fullName = snap.getString("name")
+                        ?: snap.getString("fullName")
+                        ?: "",
+                    photoUrl = snap.getString("photoUrl")
+                )
+            } catch (_: Exception) {
+                // ignore individual failures
+            }
+        }
+        return result
     }
 
     // endregion

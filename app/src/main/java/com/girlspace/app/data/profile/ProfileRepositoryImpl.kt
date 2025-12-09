@@ -1,5 +1,5 @@
 package com.girlspace.app.data.profile
-
+import com.google.firebase.firestore.FieldValue
 import com.girlspace.app.model.ProfileStats
 import com.girlspace.app.model.UserBadges
 import com.girlspace.app.model.UserProfile
@@ -92,29 +92,51 @@ class ProfileRepositoryImpl @Inject constructor() : ProfileRepository {
             badges = badges
         )
     }
-
     override suspend fun loadProfileStats(userId: String): ProfileStats {
-        val doc = firestore
-            .collection("users")
+        // Base user doc
+        val userSnap = firestore.collection("users")
             .document(userId)
             .get()
             .await()
 
-        if (!doc.exists()) {
+        if (!userSnap.exists()) {
+            // No such user → empty stats
             return ProfileStats()
         }
 
-        val followersCount = (doc.getLong("followersCount") ?: 0L).toInt()
-        val followingCount = (doc.getLong("followingCount") ?: 0L).toInt()
-        val friendsCount = (doc.getLong("friendsCount") ?: 0L).toInt()
-        val postsCount = (doc.getLong("postsCount") ?: 0L).toInt()
-        val reelsCount = (doc.getLong("reelsCount") ?: 0L).toInt()
-        val photosCount = (doc.getLong("photosCount") ?: 0L).toInt()
-        val activityStreakDays = (doc.getLong("activityStreakDays") ?: 0L).toInt()
-        val profileViewsThisWeek = (doc.getLong("profileViewsThisWeek") ?: 0L).toInt()
-
-        val mutualPreview = (doc.get("mutualConnectionsPreview") as? List<*>)?.filterIsInstance<String>()
+        // FOLLOWING: from my "following" array
+        val followingList = (userSnap.get("following") as? List<*>)
+            ?.filterIsInstance<String>()
             ?: emptyList()
+        val followingCount = followingList.size
+
+        // FOLLOWERS: users whose "following" array contains this userId
+        val followersSnap = firestore.collection("users")
+            .whereArrayContains("following", userId)
+            .get()
+            .await()
+        val followersCount = followersSnap.size()
+
+        // FRIENDS: from /friends/{uid}/list
+        val friendsSnap = firestore.collection("friends")
+            .document(userId)
+            .collection("list")
+            .get()
+            .await()
+        val friendsCount = friendsSnap.size()
+
+        // Optional: content counters if you’re storing them on the user doc
+        val postsCount = (userSnap.getLong("postsCount") ?: 0L).toInt()
+        val reelsCount = (userSnap.getLong("reelsCount") ?: 0L).toInt()
+        val photosCount = (userSnap.getLong("photosCount") ?: 0L).toInt()
+
+        // Simple mutual / follower preview – top 3 follower names
+        val mutualPreview = followersSnap.documents
+            .take(3)
+            .mapNotNull { doc ->
+                doc.getString("name")
+                    ?: doc.getString("fullName")
+            }
 
         return ProfileStats(
             followersCount = followersCount,
@@ -124,24 +146,26 @@ class ProfileRepositoryImpl @Inject constructor() : ProfileRepository {
             reelsCount = reelsCount,
             photosCount = photosCount,
             mutualConnectionsPreview = mutualPreview,
-            activityStreakDays = activityStreakDays,
-            profileViewsThisWeek = profileViewsThisWeek
+            activityStreakDays = 0,
+            profileViewsThisWeek = 0
         )
-    }
 
+    }
     override suspend fun loadRelationshipStatus(
         currentUserId: String,
         targetUserId: String
     ): RelationshipStatus {
         if (currentUserId == targetUserId) {
+            // Self-view; treat as "fully connected" for UI purposes
             return RelationshipStatus.MUTUALS
         }
 
-        // Check block relationships first (safety)
+        // --- 1) Block checks (align with FriendRepository.blockUser) ---
+        // FriendRepository writes to: blocked_users/{uid}/{uid}/{targetUid}
         val blockedByCurrent = firestore
-            .collection("users")
+            .collection("blocked_users")
             .document(currentUserId)
-            .collection("blockedUsers")
+            .collection(currentUserId)
             .document(targetUserId)
             .get()
             .await()
@@ -152,9 +176,9 @@ class ProfileRepositoryImpl @Inject constructor() : ProfileRepository {
         }
 
         val blockedByOther = firestore
-            .collection("users")
+            .collection("blocked_users")
             .document(targetUserId)
-            .collection("blockedUsers")
+            .collection(targetUserId)
             .document(currentUserId)
             .get()
             .await()
@@ -164,24 +188,36 @@ class ProfileRepositoryImpl @Inject constructor() : ProfileRepository {
             return RelationshipStatus.BLOCKED_BY_OTHER
         }
 
-        // Follow / follower checks
-        val iFollowHer = firestore
+        // --- 2) Follow relationship using "following" array on users doc ---
+        val currentSnap = firestore
             .collection("users")
             .document(currentUserId)
-            .collection("following")
-            .document(targetUserId)
             .get()
             .await()
-            .exists()
 
-        val sheFollowsMe = firestore
+        val targetSnap = firestore
             .collection("users")
             .document(targetUserId)
-            .collection("followers")
-            .document(currentUserId)
             .get()
             .await()
-            .exists()
+
+        if (!currentSnap.exists() || !targetSnap.exists()) {
+            return RelationshipStatus.NONE
+        }
+
+        fun followingSet(doc: com.google.firebase.firestore.DocumentSnapshot): Set<String> {
+            val raw = doc.get("following") as? List<*>
+            return raw
+                ?.filterIsInstance<String>()
+                ?.toSet()
+                ?: emptySet()
+        }
+
+        val currentFollowing = followingSet(currentSnap)
+        val targetFollowing = followingSet(targetSnap)
+
+        val iFollowHer = targetUserId in currentFollowing
+        val sheFollowsMe = currentUserId in targetFollowing
 
         return when {
             iFollowHer && sheFollowsMe -> RelationshipStatus.MUTUALS
@@ -195,55 +231,39 @@ class ProfileRepositoryImpl @Inject constructor() : ProfileRepository {
         currentUserId: String,
         targetUserId: String
     ): RelationshipStatus {
-        if (currentUserId == targetUserId) return RelationshipStatus.MUTUALS
-
-        val followingRef = firestore
-            .collection("users")
-            .document(currentUserId)
-            .collection("following")
-            .document(targetUserId)
-
-        val followersRef = firestore
-            .collection("users")
-            .document(targetUserId)
-            .collection("followers")
-            .document(currentUserId)
-
-        val isCurrentlyFollowing = followingRef.get().await().exists()
-
-        return if (isCurrentlyFollowing) {
-            // Unfollow: remove docs
-            followingRef.delete().await()
-            followersRef.delete().await()
-            // You might also decrement counters with Cloud Functions or here.
-            RelationshipStatus.NONE
-        } else {
-            val now = System.currentTimeMillis()
-
-            followingRef.set(
-                mapOf(
-                    "followedAt" to now
-                )
-            ).await()
-
-            followersRef.set(
-                mapOf(
-                    "followedAt" to now
-                )
-            ).await()
-
-            // Check if they also follow you to determine mutual status
-            val sheFollowsMe = firestore
-                .collection("users")
-                .document(targetUserId)
-                .collection("following")
-                .document(currentUserId)
-                .get()
-                .await()
-                .exists()
-
-            if (sheFollowsMe) RelationshipStatus.MUTUALS else RelationshipStatus.FOLLOWING
+        if (currentUserId == targetUserId) {
+            // You can't follow yourself; keep as "mutual" self
+            return RelationshipStatus.MUTUALS
         }
+
+        val userRef = firestore
+            .collection("users")
+            .document(currentUserId)
+
+        // Read current following array once
+        val snap = userRef.get().await()
+        val currentFollowing = (snap.get("following") as? List<*>)
+            ?.filterIsInstance<String>()
+            ?.toSet()
+            ?: emptySet()
+
+        val isCurrentlyFollowing = targetUserId in currentFollowing
+
+        // Toggle using the same field that FriendRepository uses
+        if (isCurrentlyFollowing) {
+            // Unfollow → remove from array
+            userRef
+                .update("following", FieldValue.arrayRemove(targetUserId))
+                .await()
+        } else {
+            // Follow → add to array
+            userRef
+                .update("following", FieldValue.arrayUnion(targetUserId))
+                .await()
+        }
+
+        // Return fresh relationship status based on updated arrays
+        return loadRelationshipStatus(currentUserId, targetUserId)
     }
 
     override suspend fun blockUser(

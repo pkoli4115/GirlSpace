@@ -149,6 +149,7 @@ fun FeedScreen(
     }
 
     // Following set for this user
+// Following set for this user – from users/{uid}.following array
     var followingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     DisposableEffect(currentUser?.uid) {
@@ -157,14 +158,13 @@ fun FeedScreen(
         if (uid != null) {
             registration = firestore.collection("users")
                 .document(uid)
-                .collection("following")
                 .addSnapshotListener { snapshot, error ->
                     if (error != null) return@addSnapshotListener
-                    val ids = snapshot?.documents
-                        ?.map { it.id }
+                    val arr = snapshot?.get("following") as? List<*>
+                    followingIds = arr
+                        ?.filterIsInstance<String>()
                         ?.toSet()
                         ?: emptySet()
-                    followingIds = ids
                 }
         }
         onDispose { registration?.remove() }
@@ -331,15 +331,14 @@ fun FeedScreen(
                                 val authorUid = post.uid
                                 val isSaved = savedPostIds.contains(post.postId)
 
-                                // Local following state per post (no global followingIds / state / toggleFollow needed)
-                                var isFollowing by remember(post.postId) { mutableStateOf(false) }
+                                // Is current user already following this post's author?
+                                val isFollowing = currentUser?.uid != null && followingIds.contains(authorUid)
 
                                 PostCard(
                                     post = post,
                                     onAuthorClick = { authorId ->
                                         // Open that user’s profile
                                         navController.navigate("profile/$authorId")
-                                        // or navController.openUserProfile(authorId) if you created the helper
                                     },
                                     currentUserId = currentUser?.uid,
                                     isSaved = isSaved,
@@ -348,17 +347,12 @@ fun FeedScreen(
                                         val uid = currentUser?.uid ?: return@PostCard
                                         if (authorUid.isBlank() || authorUid == uid) return@PostCard
 
-                                        val followRef = firestore.collection("users")
-                                            .document(uid)
-                                            .collection("following")
-                                            .document(authorUid)
+                                        val userRef = firestore.collection("users").document(uid)
+                                        val currentlyFollowing = followingIds.contains(authorUid)
 
-                                        if (isFollowing) {
-                                            // Unfollow
-                                            followRef.delete()
-                                                .addOnSuccessListener {
-                                                    isFollowing = false
-                                                }
+                                        if (currentlyFollowing) {
+                                            // Unfollow: remove from following array
+                                            userRef.update("following", FieldValue.arrayRemove(authorUid))
                                                 .addOnFailureListener {
                                                     Toast.makeText(
                                                         context,
@@ -367,14 +361,8 @@ fun FeedScreen(
                                                     ).show()
                                                 }
                                         } else {
-                                            // Follow
-                                            val data = mapOf(
-                                                "followedAt" to FieldValue.serverTimestamp()
-                                            )
-                                            followRef.set(data, SetOptions.merge())
-                                                .addOnSuccessListener {
-                                                    isFollowing = true
-                                                }
+                                            // Follow: add to following array
+                                            userRef.update("following", FieldValue.arrayUnion(authorUid))
                                                 .addOnFailureListener {
                                                     Toast.makeText(
                                                         context,
@@ -383,6 +371,8 @@ fun FeedScreen(
                                                     ).show()
                                                 }
                                         }
+                                        // No need to set local isFollowing – snapshotListener on the user doc
+                                        // will update followingIds and recomposition will refresh the label.
                                     },
                                     onLike = { vm.toggleLike(post) },
                                     onDelete = { vm.deletePost(post) { } },
@@ -428,6 +418,7 @@ fun FeedScreen(
                                     feedVibe = feedVibe
                                 )
                             }
+
 
                             is FeedItem.ReelItem -> {
                                 ReelCard(item, feedVibe)

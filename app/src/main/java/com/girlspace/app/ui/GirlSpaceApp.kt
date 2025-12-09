@@ -1,5 +1,6 @@
 package com.girlspace.app.ui
 import androidx.navigation.NavType
+import com.girlspace.app.ui.friends.FriendsScreen
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.girlspace.app.ui.chat.ChatViewModel
@@ -161,6 +162,33 @@ fun GirlSpaceApp() {
                     onUpgrade = { /* same as before */ },
                     profileUserId = userId      // <— this flips to OTHER mode when != current user
                 )
+            }
+// Friends / Followers / Following entry point from profile metrics row
+            composable(
+                route = "friends?userId={userId}&tab={tab}",
+                arguments = listOf(
+                    navArgument("userId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                    navArgument("tab") {
+                        type = NavType.StringType
+                        defaultValue = "friends"
+                    }
+                )
+            ) { backStackEntry ->
+                val userId = backStackEntry.arguments?.getString("userId")
+                val tab = backStackEntry.arguments?.getString("tab")
+
+                FriendsScreen(
+                    profileUserId = userId,
+                    initialTab = tab,
+                    onOpenChat = { friendUid ->
+                        navController.navigate("chat_with_user/$friendUid")
+                    }
+                )
+
             }
 
             /* ---------------------------------------------------

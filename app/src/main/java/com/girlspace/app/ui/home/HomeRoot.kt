@@ -230,8 +230,11 @@ fun HomeRoot(
                     )
 
                     HomeTab.Friends -> FriendsScreen(
+                        profileUserId = null,          // current user
+                        initialTab = "friends",        // default tab when coming from bottom nav
                         onOpenChat = onOpenChatFromFriends
                     )
+
 
                     HomeTab.Communities -> GroupsScreen(
                         navController = navController,

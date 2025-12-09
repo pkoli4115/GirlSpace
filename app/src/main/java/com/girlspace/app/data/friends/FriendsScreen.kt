@@ -50,14 +50,33 @@ import com.girlspace.app.data.friends.FriendUserSummary
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun FriendsScreen(
-    onOpenChat: (String) -> Unit = {},          // ✅ NEW: callback to open chat
+    profileUserId: String? = null,
+    initialTab: String? = null,
+    onOpenChat: (String) -> Unit = {},
     viewModel: FriendsViewModel = hiltViewModel()
 ) {
 
     val uiState by viewModel.uiState.collectAsState()
+    LaunchedEffect(profileUserId, initialTab) {
+        viewModel.configureForProfile(profileUserId, initialTab)
+    }
 
-    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
-    val tabs = listOf("Friends", "Requests", "Connect", "Search")
+
+    val tabs = listOf("friends", "requests", "connect", "search")
+
+    var selectedTabIndex by rememberSaveable(profileUserId, initialTab) {
+        val fromNav = when (initialTab?.lowercase()) {
+            "followers" -> 0          // we’ll remap in Step 3 when we add a Followers tab
+            "following" -> 0          // same here; for now they all land on Friends
+            "friends" -> 0
+            "requests" -> 1
+            "connect" -> 2
+            "search" -> 3
+            else -> 0
+        }
+        mutableIntStateOf(fromNav)
+    }
+
 
     // ✅ show spinner only on “all empty + loading”
     val showGlobalLoading =
@@ -72,11 +91,11 @@ fun FriendsScreen(
             .fillMaxSize()
             .padding(top = 8.dp)
     ) {
-        TabRow(selectedTabIndex = selectedTab) {
+        TabRow(selectedTabIndex = selectedTabIndex) {
             tabs.forEachIndexed { index, title ->
                 Tab(
-                    selected = selectedTab == index,
-                    onClick = { selectedTab = index },
+                    selected = selectedTabIndex == index,
+                    onClick = { selectedTabIndex = index },
                     text = {
                         Text(
                             text = title,
@@ -89,6 +108,7 @@ fun FriendsScreen(
             }
         }
 
+
         uiState.error?.let { errorMsg ->
             Text(
                 text = errorMsg,
@@ -98,14 +118,13 @@ fun FriendsScreen(
         }
 
         Box(modifier = Modifier.fillMaxSize()) {
-            when (selectedTab) {
+            when (selectedTabIndex) {
                 // Friends tab – Messenger-style friend rows with 3-dot menu
                 0 -> FriendsTab(
                     friends = uiState.friends,
                     followingIds = uiState.followingIds,
                     onViewProfile = { /* TODO: wire profile navigation later */ },
                     onMessage = { friendUid ->
-                        // ✅ delegate to HomeRoot → NavHost → ChatScreen
                         onOpenChat(friendUid)
                     },
                     onFollow = viewModel::followUser,
@@ -113,7 +132,6 @@ fun FriendsScreen(
                     onUnfriend = viewModel::unfriend,
                     onBlock = viewModel::blockUser
                 )
-
 
                 1 -> RequestsTab(
                     requests = uiState.incomingRequests,
@@ -137,7 +155,6 @@ fun FriendsScreen(
                     outgoingRequestIds = uiState.outgoingRequestIds,
                     friends = uiState.friends
                 )
-
             }
 
             if (showGlobalLoading) {
@@ -146,6 +163,7 @@ fun FriendsScreen(
                 )
             }
         }
+
     }
 }
 
