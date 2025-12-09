@@ -1,6 +1,7 @@
 package com.girlspace.app.ui
 import androidx.navigation.NavType
 import com.girlspace.app.ui.friends.FriendsScreen
+import com.girlspace.app.ui.profile.UserPostsScreen
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.girlspace.app.ui.chat.ChatViewModel
@@ -144,6 +145,19 @@ fun GirlSpaceApp() {
                     navController = navController,
                     onLogout = { /* same as before */ },
                     onUpgrade = { /* same as before */ }
+                )
+            }
+            composable(
+                route = "user_posts/{userId}",
+                arguments = listOf(
+                    navArgument("userId") { type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val userId = backStackEntry.arguments?.getString("userId") ?: return@composable
+
+                UserPostsScreen(
+                    userId = userId,
+                    navController = navController
                 )
             }
 

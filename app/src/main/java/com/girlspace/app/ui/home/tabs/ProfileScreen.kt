@@ -1,5 +1,12 @@
 package com.girlspace.app.ui.profile
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.foundation.lazy.items
+import androidx.navigation.NavController
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.*
 import com.girlspace.app.ui.chat.ChatViewModel
 import androidx.compose.material3.CircularProgressIndicator
 import android.app.Activity
@@ -192,16 +199,48 @@ fun ProfileScreen(
 
         try {
             val firestore = FirebaseFirestore.getInstance()
-            val snapshot = firestore.collection("posts")
-                .whereEqualTo("authorId", ownerId)
-                .get()
-                .await()
+
+            // Helper to try a simple equality query on a given field
+            suspend fun queryByField(field: String): List<com.google.firebase.firestore.DocumentSnapshot> {
+                return firestore.collection("posts")
+                    .whereEqualTo(field, ownerId)
+                    .get()
+                    .await()
+                    .documents
+            }
+
+            // 1) Try the "ideal" field first
+            var docs = queryByField("authorId")
+
+            // 2) Fallbacks for common schemas (userId / uid)
+            if (docs.isEmpty()) {
+                docs = queryByField("userId")
+            }
+            if (docs.isEmpty()) {
+                docs = queryByField("uid")
+            }
+
+            // 3) Ultimate fallback – small scan + client-side filter
+            if (docs.isEmpty()) {
+                val snap = firestore.collection("posts")
+                    .limit(200)
+                    .get()
+                    .await()
+
+                docs = snap.documents.filter { doc ->
+                    val candidates = listOf("authorId", "userId", "uid", "ownerId", "creatorId")
+                    candidates.any { key ->
+                        val v = doc.getString(key)
+                        v == ownerId
+                    }
+                }
+            }
 
             val posts = mutableListOf<ProfileMediaItem>()
             val reels = mutableListOf<ProfileMediaItem>()
             val photos = mutableListOf<ProfileMediaItem>()
 
-            for (doc in snapshot.documents) {
+            for (doc in docs) {
                 val type = (doc.getString("type") ?: "post").lowercase()
                 val caption = doc.getString("caption") ?: ""
                 val mediaUrls = doc.get("mediaUrls") as? List<*>
@@ -440,12 +479,21 @@ fun ProfileScreen(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // 3) Content tabs (Posts / Reels / Photos)
+                // 3) Content tabs (Posts / Reels / Photos + counts)
+                val postsCount = userPosts.size
+                val reelsCount = userReels.size
+                val photosCount = userPhotos.size
+
                 ProfileTabsRow(
                     selectedTab = profileState.selectedTab,
+                    postsCount = postsCount,
+                    reelsCount = reelsCount,
+                    photosCount = photosCount,
                     onTabSelected = { tab ->
                         profileViewModel.onAction(ProfileAction.OnTabSelected(tab))
                     }
                 )
+
 
                 Spacer(modifier = Modifier.height(20.dp))
 
@@ -800,8 +848,12 @@ private fun MetricItem(
 @Composable
 private fun ProfileTabsRow(
     selectedTab: ProfileTab,
+    postsCount: Int,
+    reelsCount: Int,
+    photosCount: Int,
     onTabSelected: (ProfileTab) -> Unit
 ) {
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -810,25 +862,30 @@ private fun ProfileTabsRow(
             .padding(4.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
+        val postsLabel = if (postsCount > 0) "Posts ($postsCount)" else "Posts"
+        val reelsLabel = if (reelsCount > 0) "Reels ($reelsCount)" else "Reels"
+        val photosLabel = if (photosCount > 0) "Photos ($photosCount)" else "Photos"
+
         ProfileTabChip(
             tab = ProfileTab.POSTS,
-            label = "Posts",
+            label = postsLabel,
             selected = selectedTab == ProfileTab.POSTS,
             onClick = { onTabSelected(ProfileTab.POSTS) }
         )
         ProfileTabChip(
             tab = ProfileTab.REELS,
-            label = "Reels",
+            label = reelsLabel,
             selected = selectedTab == ProfileTab.REELS,
             onClick = { onTabSelected(ProfileTab.REELS) }
         )
         ProfileTabChip(
             tab = ProfileTab.PHOTOS,
-            label = "Photos",
+            label = photosLabel,
             selected = selectedTab == ProfileTab.PHOTOS,
             onClick = { onTabSelected(ProfileTab.PHOTOS) }
         )
     }
+
 }
 
 @Composable
@@ -866,7 +923,6 @@ private fun RowScope.ProfileTabChip(
         )
     }
 }
-
 @Composable
 private fun ProfileContentSection(
     selectedTab: ProfileTab,
@@ -874,72 +930,150 @@ private fun ProfileContentSection(
     reels: List<ProfileMediaItem>,
     photos: List<ProfileMediaItem>
 ) {
-    val items = when (selectedTab) {
-        ProfileTab.POSTS -> posts
-        ProfileTab.REELS -> reels
-        ProfileTab.PHOTOS -> photos
-    }
+    when (selectedTab) {
+        ProfileTab.POSTS -> {
+            // For Posts: no inline list to avoid messy stacking.
+            // Only show a message when there are zero posts.
+            if (posts.isEmpty()) {
+                Text(
+                    text = "No posts yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                // There are posts, but we don't show a preview list here anymore.
+                // The count is visible in the "Posts (N)" tab label already.
+            }
+        }
 
-    if (items.isEmpty()) {
-        Text(
-            text = when (selectedTab) {
-                ProfileTab.POSTS -> "No posts yet"
-                ProfileTab.REELS -> "No reels yet"
-                ProfileTab.PHOTOS -> "No photos yet"
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth()
-        )
-    } else {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            items.forEach { item ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
-                        .padding(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+        ProfileTab.REELS -> {
+            val items = reels
+            if (items.isEmpty()) {
+                Text(
+                    text = "No reels yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    if (!item.thumbnailUrl.isNullOrBlank()) {
-                        Box(
+                    items.forEach { item ->
+                        Row(
                             modifier = Modifier
-                                .size(64.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(MaterialTheme.colorScheme.surface)
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(
+                                        alpha = 0.4f
+                                    )
+                                )
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            AsyncImage(
-                                model = item.thumbnailUrl,
-                                contentDescription = "Media thumbnail",
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                    }
+                            if (!item.thumbnailUrl.isNullOrBlank()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(64.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                ) {
+                                    AsyncImage(
+                                        model = item.thumbnailUrl,
+                                        contentDescription = "Media thumbnail",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                            }
 
-                    Column(
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        if (item.caption.isNotBlank()) {
-                            Text(
-                                text = item.caption,
-                                style = MaterialTheme.typography.bodyMedium,
-                                maxLines = 2
-                            )
-                        } else {
-                            Text(
-                                text = when (selectedTab) {
-                                    ProfileTab.POSTS -> "Post"
-                                    ProfileTab.REELS -> "Reel"
-                                    ProfileTab.PHOTOS -> "Photo"
-                                },
-                                style = MaterialTheme.typography.bodyMedium
-                            )
+                            Column(
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (item.caption.isNotBlank()) {
+                                    Text(
+                                        text = item.caption,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 2
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Reel",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        ProfileTab.PHOTOS -> {
+            val items = photos
+            if (items.isEmpty()) {
+                Text(
+                    text = "No photos yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items.forEach { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(
+                                        alpha = 0.4f
+                                    )
+                                )
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            if (!item.thumbnailUrl.isNullOrBlank()) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(64.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(MaterialTheme.colorScheme.surface)
+                                ) {
+                                    AsyncImage(
+                                        model = item.thumbnailUrl,
+                                        contentDescription = "Media thumbnail",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(12.dp))
+                            }
+
+                            Column(
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                if (item.caption.isNotBlank()) {
+                                    Text(
+                                        text = item.caption,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 2
+                                    )
+                                } else {
+                                    Text(
+                                        text = "Photo",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -947,6 +1081,7 @@ private fun ProfileContentSection(
         }
     }
 }
+
 
 @Composable
 private fun ProfileMetaSection(
@@ -1217,6 +1352,135 @@ private fun VibeDialog(
         }
     )
 }
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UserPostsScreen(
+    userId: String,
+    navController: NavController
+) {
+    var isLoading by remember { mutableStateOf(true) }
+    var posts by remember { mutableStateOf<List<ProfileMediaItem>>(emptyList()) }
+
+    LaunchedEffect(userId) {
+        try {
+            val firestore = FirebaseFirestore.getInstance()
+
+            suspend fun queryByField(field: String): List<com.google.firebase.firestore.DocumentSnapshot> {
+                return firestore.collection("posts")
+                    .whereEqualTo(field, userId)
+                    .get()
+                    .await()
+                    .documents
+            }
+
+            var docs = queryByField("authorId")
+            if (docs.isEmpty()) docs = queryByField("userId")
+            if (docs.isEmpty()) docs = queryByField("uid")
+
+            if (docs.isEmpty()) {
+                val snap = firestore.collection("posts")
+                    .limit(200)
+                    .get()
+                    .await()
+
+                docs = snap.documents.filter { doc ->
+                    val candidates = listOf("authorId", "userId", "uid", "ownerId", "creatorId")
+                    candidates.any { key ->
+                        val v = doc.getString(key)
+                        v == userId
+                    }
+                }
+            }
+
+            posts = docs.map { doc ->
+                val type = (doc.getString("type") ?: "post").lowercase()
+                val mediaUrls = doc.get("mediaUrls") as? List<*>
+                val firstMediaUrl = mediaUrls?.firstOrNull() as? String
+                val thumb = firstMediaUrl ?: doc.getString("thumbnailUrl")
+
+                ProfileMediaItem(
+                    id = doc.id,
+                    // we don’t rely on caption here; keep it simple
+                    caption = doc.getString("caption") ?: "",
+                    thumbnailUrl = thumb,
+                    type = type
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("GirlSpace", "Failed to load user posts list", e)
+            posts = emptyList()
+        } finally {
+            isLoading = false
+        }
+    }
+
+    Scaffold(
+        topBar = {
+            SmallTopAppBar(
+                title = { Text("Posts") },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            when {
+                isLoading -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
+                posts.isEmpty() -> {
+                    Text(
+                        text = "No posts yet",
+                        modifier = Modifier.align(Alignment.Center),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        items(posts) { item: ProfileMediaItem ->
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                elevation = CardDefaults.cardElevation(2.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(12.dp)
+                                ) {
+                                    Text(
+                                        text = if (item.caption.isNotBlank()) item.caption else "Post",
+                                        style = MaterialTheme.typography.bodyMedium
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 /**
  * Update vibe both locally (DataStore via OnboardingViewModel) and in Firestore.
