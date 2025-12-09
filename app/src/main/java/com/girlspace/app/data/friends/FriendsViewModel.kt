@@ -446,13 +446,20 @@ class FriendsViewModel @Inject constructor(
             performSearch(trimmed)
         }
     }
-
     private suspend fun performSearch(query: String) {
         val currentUser = auth.currentUser ?: return
         _uiState.update { it.copy(isSearchLoading = true, error = null) }
 
         try {
             val lower = query.lowercase()
+
+            // Load blocked users for current user – we will exclude them from search results
+            val blockedSnap = db.collection("blocked_users")
+                .document(currentUser.uid)
+                .collection(currentUser.uid)
+                .get()
+                .await()
+            val blockedIds = blockedSnap.documents.map { it.id }.toSet()
 
             // Small scan of users collection; client-side filter on name/email/phone
             val snap = db.collection("users")
@@ -463,6 +470,7 @@ class FriendsViewModel @Inject constructor(
             val results = snap.documents.mapNotNull { doc ->
                 val uid = doc.id
                 if (uid == currentUser.uid) return@mapNotNull null
+                if (uid in blockedIds) return@mapNotNull null
 
                 val name = doc.getString("name")
                     ?: doc.getString("fullName")
@@ -499,6 +507,7 @@ class FriendsViewModel @Inject constructor(
             }
         }
     }
+
 // --- Helpers for profile context ------------------------------------------------------
 
     private suspend fun loadFriendsOf(userId: String): List<FriendUserSummary> {
@@ -646,6 +655,7 @@ class FriendsViewModel @Inject constructor(
         }
         return result
     }
+
 
     // endregion
 }

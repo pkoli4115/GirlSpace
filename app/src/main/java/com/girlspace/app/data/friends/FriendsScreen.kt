@@ -1,9 +1,11 @@
 package com.girlspace.app.ui.friends
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.Button
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.LaunchedEffect
-
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -53,6 +55,8 @@ fun FriendsScreen(
     profileUserId: String? = null,
     initialTab: String? = null,
     onOpenChat: (String) -> Unit = {},
+    onOpenProfile: (String) -> Unit = {},
+    onBack: () -> Unit = {},
     viewModel: FriendsViewModel = hiltViewModel()
 ) {
 
@@ -91,6 +95,37 @@ fun FriendsScreen(
             .fillMaxSize()
             .padding(top = 8.dp)
     ) {
+        // Simple top bar with optional back arrow and context title
+        val titleText = when (initialTab?.lowercase()) {
+            "followers" -> "Followers"
+            "following" -> "Following"
+            "friends" -> "Friends"
+            else -> "Friends & connections"
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (profileUserId != null) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back"
+                    )
+                }
+                Spacer(modifier = Modifier.width(4.dp))
+            }
+
+            Text(
+                text = titleText,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+
         TabRow(selectedTabIndex = selectedTabIndex) {
             tabs.forEachIndexed { index, title ->
                 Tab(
@@ -109,6 +144,7 @@ fun FriendsScreen(
         }
 
 
+
         uiState.error?.let { errorMsg ->
             Text(
                 text = errorMsg,
@@ -123,7 +159,9 @@ fun FriendsScreen(
                 0 -> FriendsTab(
                     friends = uiState.friends,
                     followingIds = uiState.followingIds,
-                    onViewProfile = { /* TODO: wire profile navigation later */ },
+                    onViewProfile = { friendUid ->
+                        onOpenProfile(friendUid)
+                    },
                     onMessage = { friendUid ->
                         onOpenChat(friendUid)
                     },
@@ -132,6 +170,7 @@ fun FriendsScreen(
                     onUnfriend = viewModel::unfriend,
                     onBlock = viewModel::blockUser
                 )
+
 
                 1 -> RequestsTab(
                     requests = uiState.incomingRequests,
@@ -198,6 +237,7 @@ private fun FriendsTab(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .clickable { onViewProfile(friend.uid) }
                     .padding(vertical = 8.dp)
             ) {
                 Row(
@@ -208,6 +248,7 @@ private fun FriendsTab(
                         name = friend.fullName,
                         photoUrl = friend.photoUrl
                     )
+
 
                     Spacer(modifier = Modifier.width(12.dp))
 

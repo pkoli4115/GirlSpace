@@ -232,10 +232,12 @@ fun HomeRoot(
                     HomeTab.Friends -> FriendsScreen(
                         profileUserId = null,          // current user
                         initialTab = "friends",        // default tab when coming from bottom nav
-                        onOpenChat = onOpenChatFromFriends
+                        onOpenChat = onOpenChatFromFriends,
+                        onOpenProfile = { friendUid ->
+                            navController.navigate("profile/$friendUid")
+                        }
+                        // onBack left as default; no back arrow when opened from bottom nav
                     )
-
-
                     HomeTab.Communities -> GroupsScreen(
                         navController = navController,
                         onUpgrade = onUpgrade

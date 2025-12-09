@@ -160,7 +160,7 @@ fun GirlSpaceApp() {
                     navController = navController,
                     onLogout = { /* same as before */ },
                     onUpgrade = { /* same as before */ },
-                    profileUserId = userId      // <— this flips to OTHER mode when != current user
+                    profileUserId = userId
                 )
             }
 // Friends / Followers / Following entry point from profile metrics row
@@ -186,9 +186,12 @@ fun GirlSpaceApp() {
                     initialTab = tab,
                     onOpenChat = { friendUid ->
                         navController.navigate("chat_with_user/$friendUid")
-                    }
+                    },
+                    onOpenProfile = { friendUid ->
+                        navController.navigate("profile/$friendUid")
+                    },
+                    onBack = { navController.popBackStack() }
                 )
-
             }
 
             /* ---------------------------------------------------
