@@ -6,6 +6,7 @@ import com.girlspace.app.ui.profile.UserPostsScreen
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
 import com.girlspace.app.ui.chat.ChatViewModel
+import com.girlspace.app.ui.feed.PostDetailScreen
 import com.girlspace.app.ui.feed.SavedPostsScreen
 import com.girlspace.app.ui.home.HomeRoot
 import com.girlspace.app.ui.login.LoginScreen
@@ -233,6 +234,22 @@ fun GirlSpaceApp() {
             composable(route = "savedPosts") {
                 SavedPostsScreen(navController = navController)
             }
+
+            // Single post detail (opened from profile → posts list)
+            composable(
+                route = "postDetail/{postId}",
+                arguments = listOf(
+                    navArgument("postId") { type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val postId = backStackEntry.arguments?.getString("postId") ?: return@composable
+
+                PostDetailScreen(
+                    postId = postId,
+                    navController = navController
+                )
+            }
+
 
 
             /* ---------------------------------------------------

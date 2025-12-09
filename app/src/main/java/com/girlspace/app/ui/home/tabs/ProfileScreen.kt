@@ -984,9 +984,16 @@ private fun ProfileContentSection(
                         ) {
                             val total = posts.size
                             Text(
-                                text = if (total > 1) "View all $total posts" else "View post",
-                                style = MaterialTheme.typography.labelLarge
+                                text = if (total > 1) {
+                                    "View all $total posts"
+                                } else {
+                                    "View 1 post"
+                                },
+                                style = MaterialTheme.typography.labelLarge,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.fillMaxWidth()
                             )
+
                         }
                     }
                 }
@@ -1357,7 +1364,12 @@ fun UserMediaScreen(
                     ) {
                         items(items) { post ->
                             Card(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        // navigate to full post detail screen
+                                        navController.navigate("postDetail/${post.postId}")
+                                    },
                                 shape = RoundedCornerShape(16.dp),
                                 colors = CardDefaults.cardColors(
                                     containerColor = MaterialTheme.colorScheme.surface
@@ -1387,7 +1399,6 @@ fun UserMediaScreen(
                                         )
                                     }
 
-                                    // Simple meta row: likes & comments
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -1413,6 +1424,7 @@ fun UserMediaScreen(
         }
     }
 }
+
 @Composable
 private fun VibeRow(
     currentVibeLabel: String,
