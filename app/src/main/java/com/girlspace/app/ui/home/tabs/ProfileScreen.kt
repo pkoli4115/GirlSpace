@@ -1,16 +1,10 @@
 package com.girlspace.app.ui.profile
-import androidx.lifecycle.viewmodel.compose.viewModel
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.foundation.lazy.items
-import androidx.navigation.NavController
+import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.material.icons.Icons
-import androidx.compose.material3.*
-import com.girlspace.app.ui.chat.ChatViewModel
-import androidx.compose.material3.CircularProgressIndicator
+import com.google.firebase.firestore.Query
+import com.girlspace.app.data.feed.Post
 import android.app.Activity
-import androidx.compose.foundation.layout.RowScope
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -21,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -28,15 +23,27 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallTopAppBar
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -56,20 +63,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavController
 import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
-import com.facebook.login.LoginManager
 import com.girlspace.app.R
+import com.girlspace.app.ui.chat.ChatViewModel
 import com.girlspace.app.ui.onboarding.OnboardingViewModel
 import com.girlspace.app.utils.AppInfo
-import com.google.android.gms.auth.api.signin.GoogleSignIn
-import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.tasks.await
-
 
 @Composable
 fun ProfileScreen(
@@ -243,9 +249,17 @@ fun ProfileScreen(
             for (doc in docs) {
                 val type = (doc.getString("type") ?: "post").lowercase()
                 val caption = doc.getString("caption") ?: ""
+
                 val mediaUrls = doc.get("mediaUrls") as? List<*>
-                val firstMediaUrl = mediaUrls?.firstOrNull() as? String
-                val thumb = firstMediaUrl ?: doc.getString("thumbnailUrl")
+                val fromList = mediaUrls?.firstOrNull() as? String
+
+                val singleMedia = doc.getString("mediaUrl")
+                    ?: doc.getString("imageUrl")
+                    ?: doc.getString("photoUrl")
+
+                val thumb = fromList
+                    ?: singleMedia
+                    ?: doc.getString("thumbnailUrl")
 
                 val item = ProfileMediaItem(
                     id = doc.id,
@@ -288,16 +302,6 @@ fun ProfileScreen(
     val currentVibeColor = vibeOptions
         .firstOrNull { it.key == vibeKey }
         ?.color ?: MaterialTheme.colorScheme.primary
-
-    // Google sign-out client
-    val webClientId = remember { context.getString(R.string.default_web_client_id) }
-    val googleSignInClient = remember {
-        val gso = GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
-            .requestIdToken(webClientId)
-            .requestEmail()
-            .build()
-        GoogleSignIn.getClient(context, gso)
-    }
 
     // Avatar picker launcher (SELF only)
     val avatarPickerLauncher = rememberLauncherForActivityResult(
@@ -478,11 +482,10 @@ fun ProfileScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // 3) Content tabs (Posts / Reels / Photos)
-                // 3) Content tabs (Posts / Reels / Photos + counts)
-                val postsCount = userPosts.size
-                val reelsCount = userReels.size
-                val photosCount = userPhotos.size
+                // 3) Content tabs (Posts / Reels / Photos + counts from ProfileStats)
+                val postsCount = profileState.profileStats.postsCount
+                val reelsCount = profileState.profileStats.reelsCount
+                val photosCount = profileState.profileStats.photosCount
 
                 ProfileTabsRow(
                     selectedTab = profileState.selectedTab,
@@ -494,15 +497,29 @@ fun ProfileScreen(
                     }
                 )
 
-
                 Spacer(modifier = Modifier.height(20.dp))
 
-                // 3b) Content section – real media for this user
+                // 3b) Content section – real media previews + "View all..." CTAs
                 ProfileContentSection(
                     selectedTab = profileState.selectedTab,
                     posts = userPosts,
                     reels = userReels,
-                    photos = userPhotos
+                    photos = userPhotos,
+                    onViewAllPosts = {
+                        profileOwnerId?.let { uid ->
+                            navController.navigate("user_media/$uid/posts")
+                        }
+                    },
+                    onViewAllReels = {
+                        profileOwnerId?.let { uid ->
+                            navController.navigate("user_media/$uid/reels")
+                        }
+                    },
+                    onViewAllPhotos = {
+                        profileOwnerId?.let { uid ->
+                            navController.navigate("user_media/$uid/photos")
+                        }
+                    }
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -601,7 +618,6 @@ fun ProfileScreen(
 // -----------------------------
 // Subsections (Composable parts)
 // -----------------------------
-
 
 @Composable
 private fun ProfileHeaderSection(
@@ -755,21 +771,25 @@ private fun OtherProfileActionsRow(
                 followBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
                 followTextColor = MaterialTheme.colorScheme.primary
             }
+
             RelationshipStatus.MUTUALS -> {
                 followLabel = "Friends"
                 followBg = Color(0xFF4CAF50).copy(alpha = 0.15f)
                 followTextColor = Color(0xFF2E7D32)
             }
+
             RelationshipStatus.BLOCKED -> {
                 followLabel = "Blocked"
                 followBg = MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
                 followTextColor = MaterialTheme.colorScheme.error
             }
+
             RelationshipStatus.BLOCKED_BY_OTHER -> {
                 followLabel = "Blocked you"
                 followBg = MaterialTheme.colorScheme.error.copy(alpha = 0.1f)
                 followTextColor = MaterialTheme.colorScheme.error
             }
+
             else -> {
                 followLabel = "Follow"
                 followBg = MaterialTheme.colorScheme.primary
@@ -885,7 +905,6 @@ private fun ProfileTabsRow(
             onClick = { onTabSelected(ProfileTab.PHOTOS) }
         )
     }
-
 }
 
 @Composable
@@ -923,17 +942,25 @@ private fun RowScope.ProfileTabChip(
         )
     }
 }
+
+/**
+ * NEW: Profile content section for Posts / Reels / Photos tabs.
+ *
+ * - Posts: only "No posts yet" or a clean "View all N posts" button (no inline list).
+ * - Reels / Photos: existing inline previews + "View all ..." button.
+ */
 @Composable
 private fun ProfileContentSection(
     selectedTab: ProfileTab,
     posts: List<ProfileMediaItem>,
     reels: List<ProfileMediaItem>,
-    photos: List<ProfileMediaItem>
+    photos: List<ProfileMediaItem>,
+    onViewAllPosts: (() -> Unit)? = null,
+    onViewAllReels: (() -> Unit)? = null,
+    onViewAllPhotos: (() -> Unit)? = null
 ) {
     when (selectedTab) {
         ProfileTab.POSTS -> {
-            // For Posts: no inline list to avoid messy stacking.
-            // Only show a message when there are zero posts.
             if (posts.isEmpty()) {
                 Text(
                     text = "No posts yet",
@@ -943,8 +970,26 @@ private fun ProfileContentSection(
                     modifier = Modifier.fillMaxWidth()
                 )
             } else {
-                // There are posts, but we don't show a preview list here anymore.
-                // The count is visible in the "Posts (N)" tab label already.
+                // Clean profile: no inline list, just a CTA
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.End
+                ) {
+                    if (onViewAllPosts != null) {
+                        Button(
+                            onClick = onViewAllPosts,
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            val total = posts.size
+                            Text(
+                                text = if (total > 1) "View all $total posts" else "View post",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    }
+                }
             }
         }
 
@@ -1008,6 +1053,21 @@ private fun ProfileContentSection(
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    if (onViewAllReels != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onViewAllReels,
+                            modifier = Modifier.align(Alignment.End),
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            val total = items.size
+                            Text(
+                                text = if (total > 1) "View all $total reels" else "View reel",
+                                style = MaterialTheme.typography.labelLarge
+                            )
                         }
                     }
                 }
@@ -1076,12 +1136,26 @@ private fun ProfileContentSection(
                             }
                         }
                     }
+
+                    if (onViewAllPhotos != null) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = onViewAllPhotos,
+                            modifier = Modifier.align(Alignment.End),
+                            shape = RoundedCornerShape(999.dp)
+                        ) {
+                            val total = items.size
+                            Text(
+                                text = if (total > 1) "View all $total photos" else "View photo",
+                                style = MaterialTheme.typography.labelLarge
+                            )
+                        }
+                    }
                 }
             }
         }
     }
 }
-
 
 @Composable
 private fun ProfileMetaSection(
@@ -1108,6 +1182,237 @@ private fun ProfileMetaSection(
     }
 }
 
+/**
+ * UserMediaScreen – generic screen for
+ *  - Posts by {user}
+ *  - Reels by {user}
+ *  - Photos by {user}
+ *
+ * No Scaffold; simple top bar row + list.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun UserMediaScreen(
+    userId: String,
+    type: String,
+    navController: NavController
+) {
+    val firestore = remember { FirebaseFirestore.getInstance() }
+
+    var isLoading by remember { mutableStateOf(true) }
+    var items by remember { mutableStateOf<List<Post>>(emptyList()) }
+    var ownerName by remember { mutableStateOf<String?>(null) }
+
+    // Load user name for "Posts by {name}" title
+    LaunchedEffect(userId) {
+        try {
+            val userDoc = firestore.collection("users")
+                .document(userId)
+                .get()
+                .await()
+
+            ownerName = userDoc.getString("name")
+                ?: userDoc.getString("fullName")
+        } catch (_: Exception) {
+            // ignore, fall back to generic title
+        }
+    }
+
+    // Load media for the given type – currently we implement only "posts"
+    LaunchedEffect(userId, type) {
+        isLoading = true
+        try {
+            when (type.lowercase()) {
+                "posts" -> {
+                    try {
+                        // 1) Try posts where uid == userId (current schema)
+                        var docs = firestore.collection("posts")
+                            .whereEqualTo("uid", userId)
+                            .get()
+                            .await()
+                            .documents
+
+                        // 2) Fallback for older posts that might have used authorId
+                        if (docs.isEmpty()) {
+                            docs = firestore.collection("posts")
+                                .whereEqualTo("authorId", userId)
+                                .get()
+                                .await()
+                                .documents
+                        }
+
+                        val list = docs
+                            .map { doc ->
+                                Post(
+                                    postId = doc.id,
+                                    uid = doc.getString("uid")
+                                        ?: doc.getString("authorId")
+                                        ?: "",
+                                    text = doc.getString("text") ?: "",
+                                    imageUrls = (doc.get("imageUrls") as? List<*>)?.mapNotNull { it as? String }
+                                        ?: emptyList(),
+                                    videoUrls = (doc.get("videoUrls") as? List<*>)?.mapNotNull { it as? String }
+                                        ?: emptyList(),
+                                    createdAt = doc.getTimestamp("createdAt"),
+                                    likeCount = (doc.getLong("likeCount") ?: 0L).toInt(),
+                                    likedBy = (doc.get("likedBy") as? List<*>)?.mapNotNull { it as? String }
+                                        ?: emptyList(),
+                                    commentsCount = (doc.getLong("commentsCount") ?: 0L).toInt(),
+                                    authorName = doc.getString("authorName"),
+                                    authorPhoto = doc.getString("authorPhoto"),
+                                    isAuthorPremium = doc.getBoolean("isAuthorPremium") ?: false
+                                )
+                            }
+                            // sort newest first without needing Firestore orderBy
+                            .sortedByDescending { it.createdAt?.seconds ?: 0L }
+
+                        items = list
+                    } catch (e: Exception) {
+                        Log.e("UserMediaScreen", "Failed to load posts for $userId", e)
+                        items = emptyList()
+                    }
+                }
+
+                "reels", "photos" -> {
+                    // still pending: will implement later
+                    items = emptyList()
+                }
+
+                else -> {
+                    items = emptyList()
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e("UserMediaScreen", "Failed to load media for $userId / $type", e)
+            items = emptyList()
+        } finally {
+            isLoading = false
+        }
+    }
+
+    val baseTitle = when (type.lowercase()) {
+        "posts" -> "Posts"
+        "reels" -> "Reels"
+        "photos" -> "Photos"
+        else -> "Media"
+    }
+
+    val finalTitle = ownerName?.let { "$baseTitle by $it" } ?: baseTitle
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = { Text(finalTitle) },
+                navigationIcon = {
+                    IconButton(onClick = { navController.popBackStack() }) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            when {
+                isLoading -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
+                items.isEmpty() -> {
+                    Text(
+                        text = when (type.lowercase()) {
+                            "posts" -> "No posts yet"
+                            "reels" -> "No reels yet"
+                            "photos" -> "No photos yet"
+                            else -> "No content yet"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(horizontal = 32.dp)
+                    )
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 12.dp,
+                            end = 12.dp,
+                            top = 8.dp,
+                            bottom = 24.dp
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        items(items) { post ->
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surface
+                                ),
+                                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (post.text.isNotBlank()) {
+                                        Text(
+                                            text = post.text,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+
+                                    if (post.imageUrls.isNotEmpty()) {
+                                        AsyncImage(
+                                            model = post.imageUrls.first(),
+                                            contentDescription = "Post image",
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(min = 160.dp)
+                                                .clip(RoundedCornerShape(12.dp))
+                                        )
+                                    }
+
+                                    // Simple meta row: likes & comments
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "${post.likeCount} likes",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text(
+                                            text = "${post.commentsCount} comments",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 @Composable
 private fun VibeRow(
     currentVibeLabel: String,
@@ -1273,10 +1578,8 @@ private fun VersionInfoSection() {
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
             textAlign = TextAlign.Center
         )
-
     }
-
-   }
+}
 
 // -----------------------------
 // Vibe dialog + helpers
@@ -1288,7 +1591,7 @@ private data class VibeOption(
     val color: Color
 )
 
-// Simple media item used by profile tabs
+// Simple media item used by profile tabs & media screen
 private data class ProfileMediaItem(
     val id: String,
     val caption: String,
@@ -1352,6 +1655,11 @@ private fun VibeDialog(
         }
     )
 }
+
+/**
+ * Legacy: UserPostsScreen – kept to avoid breaking existing nav usages.
+ * Now you should prefer UserMediaScreen with type="posts".
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserPostsScreen(
@@ -1400,7 +1708,6 @@ fun UserPostsScreen(
 
                 ProfileMediaItem(
                     id = doc.id,
-                    // we don’t rely on caption here; keep it simple
                     caption = doc.getString("caption") ?: "",
                     thumbnailUrl = thumb,
                     type = type
@@ -1452,9 +1759,9 @@ fun UserPostsScreen(
                 else -> {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 8.dp)
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp)
                     ) {
-                        items(posts) { item: ProfileMediaItem ->
+                        items(posts) { item ->
                             Card(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -1480,7 +1787,6 @@ fun UserPostsScreen(
         }
     }
 }
-
 
 /**
  * Update vibe both locally (DataStore via OnboardingViewModel) and in Firestore.

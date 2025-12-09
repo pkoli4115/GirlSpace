@@ -1,6 +1,7 @@
 package com.girlspace.app.ui
 import androidx.navigation.NavType
 import com.girlspace.app.ui.friends.FriendsScreen
+import com.girlspace.app.ui.profile.UserMediaScreen
 import com.girlspace.app.ui.profile.UserPostsScreen
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
@@ -177,6 +178,24 @@ fun GirlSpaceApp() {
                     profileUserId = userId
                 )
             }
+            // User-specific media (posts / reels / photos)
+            composable(
+                route = "user_media/{userId}/{type}",
+                arguments = listOf(
+                    navArgument("userId") { type = NavType.StringType },
+                    navArgument("type") { type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val userId = backStackEntry.arguments?.getString("userId") ?: return@composable
+                val type = backStackEntry.arguments?.getString("type") ?: "posts"
+
+                UserMediaScreen(
+                    userId = userId,
+                    type = type,
+                    navController = navController
+                )
+            }
+
 // Friends / Followers / Following entry point from profile metrics row
             composable(
                 route = "friends?userId={userId}&tab={tab}",
