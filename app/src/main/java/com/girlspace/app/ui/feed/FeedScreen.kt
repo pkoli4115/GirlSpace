@@ -1,5 +1,5 @@
 package com.girlspace.app.ui.feed
-
+import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.animateColorAsState
@@ -93,23 +93,25 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
+import androidx.navigation.NavHostController
+import androidx.hilt.navigation.compose.hiltViewModel
 
 @Composable
 fun FeedScreen(
     isCreatePostOpen: Boolean,
     onDismissCreatePost: () -> Unit,
-    onOpenCreatePost: () -> Unit
+    onOpenCreatePost: () -> Unit,
+    navController: NavHostController,
 ) {
-    val vm: FeedViewModel = viewModel()
+    val vm: FeedViewModel = hiltViewModel()
     val styleVm: FeedStyleViewModel = hiltViewModel()
-
     val feedItems by vm.feedItems.collectAsState()
     val isInitialLoading by vm.isInitialLoading.collectAsState()
     val isPaging by vm.isPaging.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
     val premiumRequired by vm.premiumRequired.collectAsState()
     val maxImages by vm.currentMaxImages.collectAsState()
-
+    val posts = vm.posts.collectAsState().value
     val feedVibe by styleVm.currentVibe.collectAsState()
     val quickVibes = styleVm.quickVibes
 
@@ -328,67 +330,58 @@ fun FeedScreen(
                                 val post = item.post
                                 val authorUid = post.uid
                                 val isSaved = savedPostIds.contains(post.postId)
-                                val isFollowingAuthor =
-                                    currentUser?.uid != null &&
-                                            authorUid.isNotBlank() &&
-                                            authorUid != currentUser.uid &&
-                                            followingIds.contains(authorUid)
+
+                                // Local following state per post (no global followingIds / state / toggleFollow needed)
+                                var isFollowing by remember(post.postId) { mutableStateOf(false) }
 
                                 PostCard(
                                     post = post,
+                                    onAuthorClick = { authorId ->
+                                        // Open that user’s profile
+                                        navController.navigate("profile/$authorId")
+                                        // or navController.openUserProfile(authorId) if you created the helper
+                                    },
                                     currentUserId = currentUser?.uid,
                                     isSaved = isSaved,
-                                    isFollowing = isFollowingAuthor,
+                                    isFollowing = isFollowing,
                                     onToggleFollow = {
-                                        val uid = currentUser?.uid
-                                        val targetUid = authorUid
-                                        if (uid == null || targetUid.isBlank() || uid == targetUid) return@PostCard
+                                        val uid = currentUser?.uid ?: return@PostCard
+                                        if (authorUid.isBlank() || authorUid == uid) return@PostCard
 
-                                        val followingRef = firestore.collection("users")
+                                        val followRef = firestore.collection("users")
                                             .document(uid)
                                             .collection("following")
-                                            .document(targetUid)
+                                            .document(authorUid)
 
-                                        val followersRef = firestore.collection("users")
-                                            .document(targetUid)
-                                            .collection("followers")
-                                            .document(uid)
-
-                                        val userDoc = firestore.collection("users").document(uid)
-                                        val targetDoc =
-                                            firestore.collection("users").document(targetUid)
-
-                                        val currentlyFollowing = followingIds.contains(targetUid)
-
-                                        if (currentlyFollowing) {
+                                        if (isFollowing) {
                                             // Unfollow
-                                            followingRef.delete()
-                                            followersRef.delete()
-                                            userDoc.update(
-                                                "followingCount",
-                                                FieldValue.increment(-1)
-                                            )
-                                            targetDoc.update(
-                                                "followersCount",
-                                                FieldValue.increment(-1)
-                                            )
+                                            followRef.delete()
+                                                .addOnSuccessListener {
+                                                    isFollowing = false
+                                                }
+                                                .addOnFailureListener {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Failed to unfollow",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
                                         } else {
                                             // Follow
                                             val data = mapOf(
-                                                "userId" to uid,
-                                                "targetId" to targetUid,
-                                                "createdAt" to FieldValue.serverTimestamp()
+                                                "followedAt" to FieldValue.serverTimestamp()
                                             )
-                                            followingRef.set(data, SetOptions.merge())
-                                            followersRef.set(data, SetOptions.merge())
-                                            userDoc.update(
-                                                "followingCount",
-                                                FieldValue.increment(1)
-                                            )
-                                            targetDoc.update(
-                                                "followersCount",
-                                                FieldValue.increment(1)
-                                            )
+                                            followRef.set(data, SetOptions.merge())
+                                                .addOnSuccessListener {
+                                                    isFollowing = true
+                                                }
+                                                .addOnFailureListener {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Failed to follow",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
                                         }
                                     },
                                     onLike = { vm.toggleLike(post) },
@@ -428,19 +421,11 @@ fun FeedScreen(
                                                 }
                                         }
                                     },
-                                    onComment = { text ->
-                                        vm.addComment(post.postId, text)
-                                    },
+                                    onComment = { text -> vm.addComment(post.postId, text) },
                                     onOpenMedia = { urls, index ->
                                         mediaViewerState = MediaViewerState(urls, index)
                                     },
                                     feedVibe = feedVibe
-                                )
-                                Divider(
-                                    modifier = Modifier
-                                        .padding(horizontal = 12.dp)
-                                        .fillMaxWidth(),
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
                                 )
                             }
 
@@ -952,6 +937,7 @@ fun ErrorRow(message: String) {
 @Composable
 fun PostCard(
     post: Post,
+    onAuthorClick: (String) -> Unit,
     currentUserId: String?,
     isSaved: Boolean,
     isFollowing: Boolean,
@@ -1021,48 +1007,60 @@ fun PostCard(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (!post.authorPhoto.isNullOrBlank()) {
-                    AsyncImage(
-                        model = post.authorPhoto,
-                        contentDescription = "Author photo",
-                        modifier = Modifier
-                            .size(40.dp)
-                            .padding(end = 8.dp),
-                        contentScale = ContentScale.Crop
-                    )
-                } else {
-                    Surface(
-                        modifier = Modifier
-                            .size(40.dp)
-                            .padding(end = 8.dp),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                        shape = CircleShape
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
+                // LEFT: avatar + name/time (clickable → open profile)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable {
+                            onAuthorClick(post.uid)
+                        }
+                ) {
+                    if (!post.authorPhoto.isNullOrBlank()) {
+                        AsyncImage(
+                            model = post.authorPhoto,
+                            contentDescription = "Author photo",
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Surface(
+                            modifier = Modifier
+                                .size(40.dp),
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                            shape = CircleShape
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Text(
+                                    text = (post.authorName?.firstOrNull()?.uppercase()) ?: "?",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Column {
+                        Text(
+                            text = post.authorName ?: "GirlSpace User",
+                            style = MaterialTheme.typography.titleMedium.copy(
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        )
+                        if (dateText.isNotBlank()) {
                             Text(
-                                text = (post.authorName?.firstOrNull()?.uppercase()) ?: "?",
-                                style = MaterialTheme.typography.titleMedium
+                                text = dateText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }
                 }
 
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = post.authorName ?: "GirlSpace User",
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.SemiBold
-                        )
-                    )
-                    if (dateText.isNotBlank()) {
-                        Text(
-                            text = dateText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-
+                // MIDDLE: Follow / Following (only for other users)
                 if (currentUserId != null && currentUserId != post.uid) {
                     TextButton(onClick = onToggleFollow) {
                         Text(
@@ -1073,6 +1071,7 @@ fun PostCard(
                     }
                 }
 
+                // RIGHT: 3-dots menu
                 Box {
                     IconButton(onClick = { showMoreMenu = true }) {
                         Icon(
@@ -1253,7 +1252,7 @@ fun PostCard(
                 }
             }
 
-            // 👀 Simple engagement indicator for your own posts
+            // Simple engagement indicator for your own posts
             if (currentUserId != null && currentUserId == post.uid) {
                 val interactions = (post.likeCount ?: 0) + (post.commentsCount ?: 0)
                 if (interactions > 0) {

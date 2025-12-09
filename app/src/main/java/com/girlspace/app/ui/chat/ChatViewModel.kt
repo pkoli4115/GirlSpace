@@ -608,14 +608,24 @@ class ChatViewModel : ViewModel() {
     }
 
     // Ensure correct thread selected when entering via route "chat/{threadId}"
+    // Ensure correct thread selected when entering via route "chat/{threadId}"
     fun ensureThreadSelected(threadId: String) {
         val current = _selectedThread.value
         if (current?.id == threadId) return
 
+        // 🔄 Clear old chat UI so previous conversation doesn't flash
+        _allMessages.value = emptyList()
+        _messages.value = emptyList()
+        _errorMessage.value = null
+        _inputText.value = ""
+        _isTyping.value = false
+
         val fromList = _threads.value.firstOrNull { it.id == threadId }
         if (fromList != null) {
+            // We already know this thread -> select it
             selectThread(fromList)
         } else {
+            // Not in local list -> fetch from Firestore
             viewModelScope.launch {
                 try {
                     val snap = firestore.collection("chatThreads")

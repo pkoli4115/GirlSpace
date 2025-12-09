@@ -51,7 +51,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import java.util.Locale
 import java.text.SimpleDateFormat
-
+import androidx.navigation.NavHostController
 data class SavedPostPreview(
     val postId: String = "",
     val authorId: String? = null,
@@ -62,8 +62,11 @@ data class SavedPostPreview(
 
 @Composable
 fun SavedPostsScreen(
-    onBack: () -> Unit
-) {
+    navController: NavHostController,
+    viewModel: SavedPostsViewModel = hiltViewModel<SavedPostsViewModel>()
+)
+{
+
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     val firestore = remember { FirebaseFirestore.getInstance() }
@@ -199,12 +202,13 @@ fun SavedPostsScreen(
                     .padding(horizontal = 8.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onBack) {
+                IconButton(onClick = { navController.popBackStack() }) {
                     Icon(
                         imageVector = Icons.Filled.ArrowBack,
                         contentDescription = "Back"
                     )
                 }
+
                 Text(
                     text = "Saved posts",
                     style = MaterialTheme.typography.titleLarge,
@@ -316,6 +320,9 @@ fun SavedPostsScreen(
                                             item {
                                                 PostCard(
                                                     post = p,
+                                                    onAuthorClick = { authorId ->
+                                                        navController.navigate("profile/$authorId")
+                                                    },
                                                     currentUserId = user.uid,
                                                     isSaved = selectedIsSaved,
                                                     isFollowing = isFollowingAuthor,
@@ -333,7 +340,8 @@ fun SavedPostsScreen(
                                                             .document(targetUid)
                                                             .collection("followers")
                                                             .document(uid)
-                                                                                                             val userDoc = firestore.collection("users").document(uid)
+
+                                                        val userDoc = firestore.collection("users").document(uid)
                                                         val targetDoc = firestore.collection("users").document(targetUid)
 
                                                         val currentlyFollowing = followingIds.contains(targetUid)
@@ -397,6 +405,7 @@ fun SavedPostsScreen(
                                                     },
                                                     feedVibe = feedVibe
                                                 )
+
                                             }
                                         }
                                     }

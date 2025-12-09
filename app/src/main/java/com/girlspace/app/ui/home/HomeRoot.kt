@@ -213,6 +213,7 @@ fun HomeRoot(
             ) { page ->
                 when (HomeTab.values()[page]) {
                     HomeTab.Feed -> FeedScreen(
+                        navController = navController,
                         isCreatePostOpen = showCreatePost,
                         onDismissCreatePost = { showCreatePost = false },
                         onOpenCreatePost = { showCreatePost = true }
