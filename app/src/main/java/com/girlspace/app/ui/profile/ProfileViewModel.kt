@@ -160,16 +160,48 @@ class ProfileViewModel @Inject constructor(
         val targetUserId = state.profileUserId ?: return
         if (state.mode != ProfileMode.OTHER) return
 
+        // Remember what the relationship was *before* we toggle
+        val previousStatus = state.relationshipStatus
+        val wasFollowingBefore =
+            previousStatus == RelationshipStatus.FOLLOWING ||
+                    previousStatus == RelationshipStatus.MUTUALS
+
         viewModelScope.launch {
             try {
                 val newStatus = repository.toggleFollow(currentUserId, targetUserId)
+
+                val isFollowingNow =
+                    newStatus == RelationshipStatus.FOLLOWING ||
+                            newStatus == RelationshipStatus.MUTUALS
+
+                // Compute how followers count should change for the *profile user*
+                val followersDelta = when {
+                    !wasFollowingBefore && isFollowingNow -> 1   // started following
+                    wasFollowingBefore && !isFollowingNow -> -1  // stopped following
+                    else -> 0
+                }
+
+                val updatedStats = _uiState.value.profileStats.let { stats ->
+                    if (followersDelta == 0) {
+                        stats
+                    } else {
+                        stats.copy(
+                            followersCount = (stats.followersCount + followersDelta)
+                                .coerceAtLeast(0)
+                        )
+                    }
+                }
+
+
                 val message = when (newStatus) {
                     RelationshipStatus.FOLLOWING,
                     RelationshipStatus.MUTUALS -> "You’re now following this user"
                     else -> "You unfollowed this user"
                 }
+
                 _uiState.value = _uiState.value.copy(
                     relationshipStatus = newStatus,
+                    profileStats = updatedStats,
                     infoMessage = message
                 )
             } catch (e: Exception) {
