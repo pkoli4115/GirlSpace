@@ -166,7 +166,7 @@ fun GroupsScreen(
             title = { Text("Upgrade required") },
             text = {
                 Text(
-                    "Your current GirlSpace plan doesn’t allow creating more groups.\n\n" +
+                    "Your current Togetherly plan doesn’t allow creating more groups.\n\n" +
                             "Free: cannot create groups\n" +
                             "Basic: 1 group\n" +
                             "Premium+: unlimited groups."

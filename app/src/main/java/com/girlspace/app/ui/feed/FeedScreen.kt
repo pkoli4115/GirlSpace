@@ -1212,10 +1212,10 @@ fun PostCard(
                             if (post.text.isNotBlank()) {
                                 append(post.text.trim())
                             } else {
-                                append("Check out this post on GirlSpace!")
+                                append("Check out this post on Togetherly!")
                             }
                             append("\n\n")
-                            append("Open in GirlSpace: https://girlspace.app/post/${post.postId}")
+                            append("Open in Togetherly: https://togetherly.app/post/${post.postId}")
                         }
 
                         val intent = Intent(Intent.ACTION_SEND).apply {
