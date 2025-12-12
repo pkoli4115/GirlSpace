@@ -2,6 +2,12 @@ package com.girlspace.app.ui.chat
 
 // GirlSpace – ChatViewModel.kt
 // Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
+import androidx.lifecycle.viewModelScope
+import com.girlspace.app.moderation.ModerationService
+import com.girlspace.app.moderation.ContentKind
+import com.girlspace.app.moderation.ModerationManager
+import com.girlspace.app.moderation.ModerationSendState
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.combine
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -38,6 +44,13 @@ class ChatViewModel : ViewModel() {
     private val firestore = FirebaseFirestore.getInstance()
     private val storage = FirebaseStorage.getInstance()
     private val messagesRef = firestore.collection("chat_messages")
+    // --- MODERATION SUPPORT ---
+
+
+    private val moderationManager = ModerationManager()
+
+    private val _sendState = MutableStateFlow<ModerationSendState>(ModerationSendState.Idle)
+    val sendState: StateFlow<ModerationSendState> = _sendState
 
     private val currentUserId: String?
         get() = auth.currentUser?.uid
@@ -910,8 +923,7 @@ class ChatViewModel : ViewModel() {
 
     // -------------------------------------------------------------
     // SEND MESSAGE
-    // -------------------------------------------------------------
-    fun sendMessage() {
+    fun sendMessageInternal() {
         val thread = _selectedThread.value ?: return
         val text = _inputText.value.trim()
         if (text.isEmpty()) return
@@ -921,14 +933,37 @@ class ChatViewModel : ViewModel() {
             try {
                 _isSending.value = true
 
-                repo.sendMessage(
-                    threadId = thread.id,
-                    text = text
+                // 🔹 Run hybrid moderation: on-device + pending_content write
+                val result = moderationManager.submitTextForModeration(
+                    rawText = text,
+                    kind = ContentKind.CHAT_MESSAGE,
+                    contextId = thread.id
                 )
 
-                _inputText.value = ""
-                updateTypingState()
-                markUserActive()
+                when {
+                    // ❌ Hard-blocked locally (bad words etc.)
+                    result.blockedLocally -> {
+                        _errorMessage.value =
+                            result.message ?: "Message blocked by community guidelines."
+                        return@launch
+                    }
+
+                    // ✅ Successfully written to pending_content; CF will handle the rest
+                    result.success -> {
+                        // Clear input, reset typing, mark user active
+                        _inputText.value = ""
+                        updateTypingState()
+                        markUserActive()
+
+                        // Optional: you could set some "pending" UI flag here if you want
+                    }
+
+                    // ❌ Failed to write to pending_content (network / permissions etc.)
+                    else -> {
+                        _errorMessage.value =
+                            result.message ?: "Failed to send message. Please try again."
+                    }
+                }
             } catch (e: Exception) {
                 _errorMessage.value = e.message
                 Log.e("Chat", "sendMessage failed", e)
@@ -937,6 +972,8 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
+    fun sendMessage() = sendMessageInternal()
 
     // -------------------------------------------------------------
     // MEDIA SEND (gallery / file picker / voice notes)

@@ -1,4 +1,6 @@
 package com.girlspace.app.ui.feed
+import com.girlspace.app.moderation.ModerationManager
+import com.girlspace.app.moderation.ContentKind
 import com.google.firebase.firestore.FieldValue
 import android.content.Context
 import android.graphics.BitmapFactory
@@ -28,6 +30,7 @@ class FeedViewModel : ViewModel() {
         storage = FirebaseStorage.getInstance()
     )
     private val engine = FeedEngine(firestore)
+    private val moderationManager = ModerationManager()
 
     // Mixed feed items (posts + reels + ads + top picks + evergreen)
     private val _feedItems = MutableStateFlow<List<FeedItem>>(emptyList())
@@ -248,9 +251,36 @@ class FeedViewModel : ViewModel() {
             return
         }
 
-        // 3) Decode images + create post
+        // 3) Moderation + decode images + create post
         viewModelScope.launch {
             try {
+                val trimmedText = text.trim()
+
+                // 🔍 Run moderation only if there is some text
+                if (trimmedText.isNotEmpty()) {
+                    try {
+                        val moderationResult = moderationManager.submitTextForModeration(
+                            rawText = trimmedText,
+                            kind = ContentKind.FEED_POST,
+                            contextId = null // optional: could be "feed_composer"
+                        )
+
+                        if (moderationResult.blockedLocally) {
+                            _isCreating.value = false
+                            _errorMessage.value = moderationResult.message
+                                ?: "Post blocked by community guidelines."
+                            return@launch
+                        }
+                        // If success/failed but not blockedLocally, we still continue:
+                        //  - success → logged to pending_content for AI review
+                        //  - failure → just log and continue posting
+                    } catch (e: Exception) {
+                        Log.e("FeedViewModel", "Moderation failed for post", e)
+                        // Do NOT block post just because moderation logging failed
+                    }
+                }
+
+                // Decode images
                 val bitmaps = withContext(Dispatchers.IO) {
                     imageUris.mapNotNull { uri ->
                         try {
@@ -264,8 +294,9 @@ class FeedViewModel : ViewModel() {
                     }
                 }
 
+                // Create post as before
                 repo.createPost(
-                    text = text.trim(),
+                    text = trimmedText,
                     bitmaps = bitmaps
                 ) { result ->
                     _isCreating.value = false
@@ -281,7 +312,8 @@ class FeedViewModel : ViewModel() {
                         }
 
                         is CreatePostResult.Error -> {
-                            _errorMessage.value = result.message ?: "Failed to create post"
+                            _errorMessage.value =
+                                result.message ?: "Failed to create post"
                         }
                     }
                 }
@@ -291,13 +323,41 @@ class FeedViewModel : ViewModel() {
             }
         }
     }
+
     fun addComment(postId: String, text: String) {
         if (text.isBlank()) return
 
+        val trimmed = text.trim()
+
         viewModelScope.launch {
             _isLoading.value = true
+
+            // 1) Moderation
             try {
-                repo.addComment(postId, text) { ok ->
+                val moderationResult = moderationManager.submitTextForModeration(
+                    rawText = trimmed,
+                    kind = ContentKind.FEED_POST,
+                    contextId = postId
+                )
+
+
+                if (moderationResult.blockedLocally) {
+                    _isLoading.value = false
+                    _errorMessage.value =
+                        moderationResult.message ?: "Comment blocked by community guidelines."
+                    return@launch
+                }
+                // If success or failure but not blockedLocally:
+                //  - success → logged to pending_content
+                //  - failure → log and still allow comment to go through
+            } catch (e: Exception) {
+                Log.e("FeedViewModel", "Moderation failed for comment", e)
+                // Don't fully break comments just because moderation logging failed
+            }
+
+            // 2) Actual Firestore write (same as before)
+            try {
+                repo.addComment(postId, trimmed) { ok ->
                     _isLoading.value = false
                     if (!ok) {
                         _errorMessage.value = "Failed to add comment"
@@ -308,10 +368,12 @@ class FeedViewModel : ViewModel() {
                 }
             } catch (e: Exception) {
                 _isLoading.value = false
-                _errorMessage.value = e.localizedMessage ?: "Failed to add comment"
+                _errorMessage.value =
+                    e.localizedMessage ?: "Failed to add comment"
             }
         }
     }
+
 
     override fun onCleared() {
         super.onCleared()

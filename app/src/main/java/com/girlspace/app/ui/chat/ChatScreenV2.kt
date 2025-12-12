@@ -1828,14 +1828,13 @@ fun ChatScreenV2(
                     val canSend by remember(inputText, attachedMedia.size) {
                         mutableStateOf(inputText.isNotBlank() || attachedMedia.isNotEmpty())
                     }
-
-                    // Quick-like (thumbs-up)
+// Quick-like (thumbs-up)
                     if (!canSend && !isRecording) {
                         IconButton(
                             onClick = {
                                 if (!isSending) {
                                     vm.setInputText("👍")
-                                    vm.sendMessage()
+                                    vm.sendMessage()   // <- now goes through moderationManager
                                 }
                             }
                         ) {
@@ -1847,7 +1846,7 @@ fun ChatScreenV2(
                         }
                     }
 
-                    // Mic / Send
+// Mic / Send
                     IconButton(
                         onClick = {
                             if (!canSend) {
@@ -1860,7 +1859,7 @@ fun ChatScreenV2(
                                 return@IconButton
                             }
 
-                            // SEND
+                            // SEND text (will be moderated)
                             var finalText = inputText
 
                             replyTo?.let { target ->
@@ -1880,7 +1879,7 @@ fun ChatScreenV2(
 
                             if (finalText.isNotBlank()) {
                                 vm.setInputText(finalText)
-                                vm.sendMessage()
+                                vm.sendMessage()  // <- moderated send
                             }
 
                             if (attachedMedia.isNotEmpty()) {
@@ -1930,6 +1929,7 @@ fun ChatScreenV2(
                             }
                         }
                     }
+
                 }
             }
         }

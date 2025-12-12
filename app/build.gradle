@@ -14,8 +14,8 @@ android {
         applicationId "com.girlspace.app"
         minSdk 24
         targetSdk 35
-        versionCode 15
-        versionName "15.1.1"
+        versionCode 19
+        versionName "19.1.1"
         vectorDrawables.useSupportLibrary = true
     }
 
@@ -38,7 +38,9 @@ android {
         freeCompilerArgs += "-Xskip-metadata-version-check"
     }
 
-    buildFeatures { compose true }
+    buildFeatures {
+        compose true
+    }
 
     composeOptions {
         kotlinCompilerExtensionVersion '1.5.14'
@@ -75,8 +77,7 @@ dependencies {
     implementation 'androidx.compose.material3:material3'
     implementation "com.google.android.material:material:1.12.0"
     implementation 'androidx.compose.material:material-icons-extended'
-
-
+    implementation "com.google.android.play:app-update:2.1.0"
 
     /* ------------------------------
        Core AndroidX
@@ -115,8 +116,9 @@ dependencies {
     implementation 'com.google.firebase:firebase-auth'
     implementation 'com.google.firebase:firebase-firestore'
     implementation 'com.google.firebase:firebase-storage'
-    implementation 'com.google.firebase:firebase-messaging'
+    implementation 'com.google.firebase:firebase-messaging'   // FCM
     implementation 'com.google.firebase:firebase-analytics'
+
 
     /* Google Login + Location */
     implementation 'com.google.android.gms:play-services-auth:21.2.0'

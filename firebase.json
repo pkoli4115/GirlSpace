@@ -1,0 +1,12 @@
+{
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "runtime": "nodejs20",
+      "region": "us-central1",
+      "environment": "gen2",
+      "disallowLegacyRuntimeConfig": true
+    }
+  ]
+}

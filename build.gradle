@@ -6,7 +6,7 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        // Needed ONLY if you use Crashlytics
+        // Needed ONLY if you use Crashlytics via the old Gradle plugin
         // classpath "com.google.firebase:firebase-crashlytics-gradle:3.0.2"
     }
 }
@@ -19,3 +19,6 @@ plugins {
     // Optional only if used in app module:
     // id("com.google.android.libraries.mapsplatform.secrets-gradle-plugin") apply false
 }
+
+// 🚫 IMPORTANT: no allprojects { repositories { ... } } here.
+// Repositories will come from settings.gradle instead.

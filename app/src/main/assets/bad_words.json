@@ -1,0 +1,51 @@
+{
+  "english": [
+    "fuck", "fucking", "motherfucker", "shit", "bullshit",
+    "bastard", "bitch", "slut", "whore", "pussy", "dick",
+    "dickhead", "ass", "asshole", "cunt", "cock", "prick",
+    "twat", "hoe", "fag", "faggot"
+  ],
+
+  "hindi": [
+    "चूत", "चुतिया", "चूतिया",
+    "मादरचोद", "मदरचोद", "बहनचोद", "भेंचोद",
+    "हरामी", "हरामजादा", "हरामखोर",
+    "साला", "साली", "कुतिया", "छिनाल",
+    "रंडी", "लौड़ा", "भोसड़ी", "गांड", "गांडू"
+  ],
+
+  "telugu": [
+    "రాండీ",
+    "రాండీపిల్ల",
+    "సోడ",
+    "పోలెమికాడు",
+    "చోదు",
+    "చూత్",
+    "చూతియా",
+    "దొంగమొల",
+    "కూతి",
+    "పందికొక్క",
+    "పుకు",
+
+    "లంజా*",
+    "మొద్దా*"
+  ],
+
+  "hinglish_telugu": [
+    "lanja", "lanjakodaka", "lanjagadu", "lanjapilla",
+    "modda", "moddakodaka", "moddabai",
+    "puku", "choodu", "choddu",
+    "soda", "sodaa", "gandu", "ganduu"
+  ],
+
+  "patterns": {
+    "starts_with": [
+      "lanja",
+      "modda"
+    ],
+    "starts_with_telugu": [
+      "లంజా",
+      "మొద్దా"
+    ]
+  }
+}

@@ -1,4 +1,4 @@
-package com.girlspace.app.data.chat
+package com.girlspace.app.notifications
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
