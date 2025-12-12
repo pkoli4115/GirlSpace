@@ -1,5 +1,8 @@
 package com.girlspace.app.ui.chat
-
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.foundation.lazy.itemsIndexed
+import kotlinx.coroutines.tasks.await
+import androidx.compose.foundation.combinedClickable
 import android.util.Log
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -91,15 +94,18 @@ fun ChatsScreen(
     val friends by vm.friends.collectAsState()
     val suggestions by vm.suggestions.collectAsState()
     val allThreads by vm.threads.collectAsState()
+    val totalUnread = remember(allThreads) { allThreads.sumOf { it.unreadCount } }
+
     val error by vm.errorMessage.collectAsState()
     val lastStartedThread by vm.lastStartedThread.collectAsState()
 
     val context = LocalContext.current
     val myId = FirebaseAuth.getInstance().currentUser?.uid ?: ""
-
+    val nameCache = remember { mutableStateMapOf<String, String>() } // uid -> name
     // Local search state (screen only)
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
     var searchText by rememberSaveable { mutableStateOf("") }
+    val mutedIds by vm.mutedThreadIds.collectAsState()
 
     LaunchedEffect(error) {
         if (!error.isNullOrBlank()) {
@@ -150,8 +156,14 @@ fun ChatsScreen(
     }
 
     // Final list for the avatars row
-    val peopleRow: List<ChatUserSummary> =
+    val peopleRowRaw: List<ChatUserSummary> =
         if (filteredPeople.isNotEmpty()) filteredPeople else fallbackPeople
+
+// ✅ Dedupe by uid to avoid duplicate keys + repeated avatars
+    val peopleRow: List<ChatUserSummary> = remember(peopleRowRaw) {
+        peopleRowRaw.distinctBy { it.uid }
+    }
+
 
     // Filter threads by search (name or last message)
     val threads: List<ChatThread> = remember(allThreads, searchText, myId) {
@@ -196,10 +208,29 @@ fun ChatsScreen(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        text = "Chats",
-                        style = MaterialTheme.typography.titleLarge
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "Chats",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+
+                        if (totalUnread > 0) {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = if (totalUnread > 99) "99+" else totalUnread.toString(),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color.White,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
+                            }
+                        }
+                    }
                 },
                 actions = {
                     IconButton(onClick = { isSearchActive = !isSearchActive }) {
@@ -255,15 +286,15 @@ fun ChatsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    items(peopleRow, key = { it.uid }) { user ->
+                    itemsIndexed(
+                        items = peopleRow,
+                        key = { index, user -> "${user.uid}_$index" } // ✅ guaranteed unique
+                    ) { _, user ->
                         Column(
                             modifier = Modifier
                                 .width(64.dp)
                                 .clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    // Start / open chat (thread + navigate via lastStartedThread)
-                                    vm.startChatWithUser(user.uid)
-                                },
+                                .clickable { vm.startChatWithUser(user.uid) },
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             ChatUserAvatar(
@@ -303,26 +334,40 @@ fun ChatsScreen(
                     )
                 }
             } else {
+                // 🔒 HARD SAFETY: ensure no duplicate thread IDs reach LazyColumn
+                val safeThreads = remember(threads) {
+                    threads.distinctBy { it.id }
+                }
+
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    items(
-                        items = threads,
-                        key = { it.id }
-                    ) { thread ->
-                        val otherId = thread.otherUserId(myId)
+                    itemsIndexed(
+                        items = safeThreads,
+                        key = { index, thread ->
+                            // 🔒 GUARANTEED unique per composition frame
+                            "${thread.id}_$index"
+                        }
+                    ) { _, thread ->
+                    val otherId = thread.otherUserId(myId)
                         val isOnline = presenceMap[otherId] ?: false
 
                         ChatThreadRow(
                             thread = thread,
                             myId = myId,
                             isOnline = isOnline,
+                            nameCache = nameCache,
+                            isMuted = mutedIds.contains(thread.id),
+                            onToggleMute = { mute ->
+                                vm.setThreadMuted(thread.id, mute)
+                            },
                             onClick = {
                                 vm.selectThread(thread)
                                 onOpenThread(thread)
                             }
                         )
+
                     }
                 }
             }
@@ -397,13 +442,18 @@ private fun ChatUserAvatar(
  * - 1-1: single avatar + online dot + last message
  * - Group: stacked avatars + “You, A, B +N” + “X online • last message”
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ChatThreadRow(
     thread: ChatThread,
     myId: String,
     isOnline: Boolean,
+    isMuted: Boolean,
+    onToggleMute: (Boolean) -> Unit,
+    nameCache: MutableMap<String, String>,
     onClick: () -> Unit
-) {
+)
+{
     val firestore = remember { FirebaseFirestore.getInstance() }
 
     var title by remember(thread.id) { mutableStateOf(thread.otherUserName(myId)) }
@@ -426,10 +476,40 @@ private fun ChatThreadRow(
             isGroup = participants.size > 2
 
             if (!isGroup) {
-                // 1-1 chat → keep legacy logic
+                val otherUid = thread.otherUserId(myId)
+
+                // ✅ Use cached name if we have it (prevents "GirlSpace user" flicker on scroll)
+                val cached = nameCache[otherUid]
+                if (!cached.isNullOrBlank()) {
+                    title = cached
+                    return@LaunchedEffect
+                }
+
+                // fallback once (only until first fetch completes)
                 title = thread.otherUserName(myId)
+
+                try {
+                    val userDoc = firestore.collection("users")
+                        .document(otherUid)
+                        .get()
+                        .await()
+
+
+                    val displayName =
+                        userDoc.getString("displayName")
+                            ?: userDoc.getString("name")
+                            ?: userDoc.getString("fullName")
+                            ?: userDoc.getString("username")
+
+                    if (!displayName.isNullOrBlank()) {
+                        nameCache[otherUid] = displayName
+                        title = displayName
+                    }
+                } catch (_: Exception) { }
+
                 return@LaunchedEffect
             }
+
 
             val names = mutableListOf<String>()
             val avatars = mutableListOf<String>()
@@ -500,7 +580,10 @@ private fun ChatThreadRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = { onToggleMute(!isMuted) }
+            )
             .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -570,6 +653,13 @@ private fun ChatThreadRow(
                     text = timeText,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            if (isMuted) {
+                Text(
+                    text = "🔕",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
 

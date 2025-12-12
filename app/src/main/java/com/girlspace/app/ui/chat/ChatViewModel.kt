@@ -2,6 +2,9 @@ package com.girlspace.app.ui.chat
 
 // GirlSpace – ChatViewModel.kt
 // Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
+
+import kotlinx.coroutines.flow.asStateFlow
+
 import androidx.lifecycle.viewModelScope
 import com.girlspace.app.moderation.ModerationService
 import com.girlspace.app.moderation.ContentKind
@@ -59,6 +62,17 @@ class ChatViewModel : ViewModel() {
         auth = auth,
         firestore = firestore
     )
+    private fun Any?.toMillisSafe(): Long {
+        return when (this) {
+            is Long -> this
+            is Int -> this.toLong()
+            is Double -> this.toLong()
+            is Float -> this.toLong()
+            is Timestamp -> this.toDate().time
+            is java.util.Date -> this.time
+            else -> 0L
+        }
+    }
 
     private var threadsListener: ListenerRegistration? = null
     private var msgListener: ListenerRegistration? = null
@@ -187,10 +201,43 @@ class ChatViewModel : ViewModel() {
         listenThreads()
         loadUserPlan()
         loadFriendsAndSuggestions()
+        listenMutedThreads()
 
         viewModelScope.launch {
             markUserActive()
         }
+    }
+    // -------------------------------------------------------------
+// UNREAD + NOTIFICATION SYNC (WhatsApp style)
+// -------------------------------------------------------------
+    private fun markThreadAsRead(threadId: String) {
+        val uid = auth.currentUser?.uid ?: return
+        firestore.collection("chatThreads")
+            .document(threadId)
+            .update("unread_$uid", 0L)
+            .addOnFailureListener { e ->
+                Log.w("ChatViewModel", "markThreadAsRead failed", e)
+            }
+    }
+
+    private fun markChatNotificationsRead(threadId: String) {
+        val uid = auth.currentUser?.uid ?: return
+        val deepLink = "togetherly://chat/$threadId"
+
+        firestore.collection("users")
+            .document(uid)
+            .collection("notifications")
+            .whereEqualTo("deepLink", deepLink)
+            .whereEqualTo("read", false)
+            .get()
+            .addOnSuccessListener { snap ->
+                snap.documents.forEach { doc ->
+                    doc.reference.update("read", true)
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.w("ChatViewModel", "markChatNotificationsRead failed", e)
+            }
     }
 
     // -------------------------------------------------------------
@@ -219,6 +266,98 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
+    private fun listenMutedThreads() {
+        val uid = auth.currentUser?.uid ?: return
+
+        firestore.collection("users")
+            .document(uid)
+            .collection("mutedThreads")
+            .addSnapshotListener { snap, error ->
+                if (error != null) {
+                    Log.w("ChatViewModel", "listenMutedThreads error", error)
+                    return@addSnapshotListener
+                }
+
+                val ids = snap?.documents
+                    ?.filter { it.getBoolean("muted") != false }
+                    ?.map { it.id }
+                    ?.toSet()
+                    ?: emptySet()
+
+                _mutedThreadIds.value = ids
+            }
+    }
+
+    fun setThreadMuted(threadId: String, muted: Boolean) {
+        val uid = auth.currentUser?.uid ?: return
+        val ref = firestore.collection("users")
+            .document(uid)
+            .collection("mutedThreads")
+            .document(threadId)
+
+        if (muted) {
+            ref.set(
+                mapOf(
+                    "muted" to true,
+                    "updatedAt" to System.currentTimeMillis()
+                )
+            ).addOnFailureListener { e ->
+                Log.w("ChatViewModel", "setThreadMuted(true) failed", e)
+            }
+        } else {
+            // delete doc to keep it clean
+            ref.delete().addOnFailureListener { e ->
+                Log.w("ChatViewModel", "setThreadMuted(false) failed", e)
+            }
+        }
+    }
+    private fun markThreadReadEverywhere(threadId: String) {
+        val uid = currentUserId ?: return
+
+        viewModelScope.launch {
+            // 1) Clear WhatsApp-style unread count in chatThreads
+            repo.markThreadRead(threadId)
+
+            // 2) Mark bell CHAT notifications as read for this thread
+            try {
+                val notifCol = firestore.collection("users")
+                    .document(uid)
+                    .collection("notifications")
+
+                // Prefer explicit fields if present
+                val q1 = notifCol
+                    .whereEqualTo("read", false)
+                    .whereEqualTo("category", "CHAT")
+                    .whereEqualTo("threadId", threadId)
+                    .get()
+                    .await()
+
+                // Backward compatibility (your old docs used entityId)
+                val q2 = notifCol
+                    .whereEqualTo("read", false)
+                    .whereEqualTo("category", "CHAT")
+                    .whereEqualTo("entityId", threadId)
+                    .get()
+                    .await()
+
+                val docs = (q1.documents + q2.documents)
+                    .distinctBy { it.id }
+                    .take(200) // safety
+
+                if (docs.isNotEmpty()) {
+                    val batch = firestore.batch()
+                    docs.forEach { d ->
+                        batch.update(d.reference, "read", true)
+                    }
+                    batch.commit().await()
+                }
+            } catch (_: Exception) {
+                // fail-open (don’t crash UI)
+            }
+        }
+    }
+
     // -------------------------------------------------------------
 // FRIENDS + SUGGESTIONS (with presence)
 // -------------------------------------------------------------
@@ -550,11 +689,24 @@ class ChatViewModel : ViewModel() {
                     .await()
 
                 val existingDoc = (existingAB.documents + existingBA.documents)
-                    .firstOrNull()
+                    .firstOrNull { doc ->
+                        val participants = (doc.get("participants") as? List<*>)?.filterIsInstance<String>().orEmpty()
+                        // ✅ Only treat as 1-1 if exactly 2 participants
+                        participants.size == 2
+                    }
+
 
                 val thread: ChatThread = if (existingDoc != null) {
-                    val t = existingDoc.toObject(ChatThread::class.java)
-                    (t ?: ChatThread()).copy(id = existingDoc.id)
+                    ChatThread(
+                        id = existingDoc.id,
+                        userA = existingDoc.getString("userA") ?: "",
+                        userB = existingDoc.getString("userB") ?: "",
+                        userAName = existingDoc.getString("userAName") ?: "",
+                        userBName = existingDoc.getString("userBName") ?: "",
+                        lastMessage = existingDoc.getString("lastMessage") ?: "",
+                        lastTimestamp = existingDoc.get("lastTimestamp").toMillisSafe(),
+                        unreadCount = (existingDoc.get("unread_$myUid") as? Long)?.toInt() ?: 0
+                    )
                 } else {
                     val meDoc = firestore.collection("users")
                         .document(myUid)
@@ -646,9 +798,19 @@ class ChatViewModel : ViewModel() {
                         .get()
                         .await()
                     if (snap.exists()) {
-                        val t = snap.toObject(ChatThread::class.java)
-                        t?.let { selectThread(it.copy(id = threadId)) }
+                        val thread = ChatThread(
+                            id = threadId,
+                            userA = snap.getString("userA") ?: "",
+                            userB = snap.getString("userB") ?: "",
+                            userAName = snap.getString("userAName") ?: "",
+                            userBName = snap.getString("userBName") ?: "",
+                            lastMessage = snap.getString("lastMessage") ?: "",
+                            lastTimestamp = snap.get("lastTimestamp").toMillisSafe(),
+                            unreadCount = (snap.get("unread_${auth.currentUser?.uid ?: ""}") as? Long)?.toInt() ?: 0
+                        )
+                        selectThread(thread)
                     }
+
                 } catch (e: Exception) {
                     Log.e("ChatViewModel", "ensureThreadSelected failed", e)
                 }
@@ -661,6 +823,33 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------
     fun selectThread(thread: ChatThread) {
         _selectedThread.value = thread
+        markThreadAsRead(thread.id)
+        markChatNotificationsRead(thread.id)
+        val myId = auth.currentUser?.uid ?: return
+
+        viewModelScope.launch {
+            try {
+                // 1) Reset unread counter for THIS thread for me (drives ChatsScreen badges)
+                firestore.collection("chatThreads")
+                    .document(thread.id)
+                    .update("unread_$myId", 0L)
+
+                // 2) Mark bell notifications for THIS thread as read
+                // users/{uid}/notifications where entityId == threadId and read == false
+                val snap = firestore.collection("users")
+                    .document(myId)
+                    .collection("notifications")
+                    .whereEqualTo("entityId", thread.id)
+                    .whereEqualTo("read", false)
+                    .get()
+                    .await()
+
+                val batch = firestore.batch()
+                snap.documents.forEach { d -> batch.update(d.reference, "read", true) }
+                batch.commit().await()
+
+            } catch (_: Exception) { }
+        }
 
         // -----------------------------------------
         // -----------------------------------------
@@ -823,6 +1012,8 @@ class ChatViewModel : ViewModel() {
                 _blockedUsers.value = blocked
             }
     }
+    private val _mutedThreadIds = MutableStateFlow<Set<String>>(emptySet())
+    val mutedThreadIds: StateFlow<Set<String>> = _mutedThreadIds
 
     // Pagination: load older messages
     fun loadMoreMessages() {

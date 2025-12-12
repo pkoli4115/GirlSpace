@@ -1,4 +1,9 @@
 package com.girlspace.app.ui
+import com.girlspace.app.ui.notifications.NotificationsScreen
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
+import com.girlspace.app.utils.DeepLinkStore
 import androidx.navigation.NavType
 import com.girlspace.app.ui.friends.FriendsScreen
 import com.girlspace.app.ui.profile.UserMediaScreen
@@ -43,6 +48,15 @@ fun GirlSpaceApp() {
     // Apply global color scheme based on vibe
     VibeTheme(themeMode = themeMode) {
         val navController = rememberNavController()
+        val openThreadId by DeepLinkStore.openChatThreadId.collectAsState()
+
+        LaunchedEffect(openThreadId) {
+            val tid = openThreadId
+            if (!tid.isNullOrBlank()) {
+                navController.navigate("chat/$tid") { launchSingleTop = true }
+                DeepLinkStore.clearChat()
+            }
+        }
 
         NavHost(
             navController = navController,
@@ -130,6 +144,17 @@ fun GirlSpaceApp() {
                 )
             }
 
+            composable("notifications") {
+                NotificationsScreen(
+                    onBack = { navController.popBackStack() },
+                    onNavigate = { deepLink ->
+                        if (deepLink.startsWith("togetherly://chat/")) {
+                            val threadId = deepLink.substringAfterLast("/")
+                            navController.navigate("chat/$threadId")
+                        }
+                    }
+                )
+            }
 
             /* ---------------------------------------------------
                 5) PREMIUM UPGRADE SCREEN

@@ -220,7 +220,7 @@ class FeedEngine(
         // Evergreen fallback if too few posts
         if (withAds.isEmpty()) {
             withAds += FeedItem.EvergreenCard(
-                title = "Welcome to GirlSpace",
+                title = "Welcome to Togetherly",
                 caption = "Be the first to post and inspire others ✨"
             )
         }

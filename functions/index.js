@@ -1,3 +1,5 @@
+/* eslint-disable */
+
 // Use v1 compatibility API so that functions.firestore.document works
 const functions = require("firebase-functions/v1");
 const admin = require("firebase-admin");
@@ -8,6 +10,10 @@ if (!admin.apps.length) {
 }
 
 const db = admin.firestore();
+
+// ----------------------------------------------------------------------------
+// MODERATION (existing)
+// ----------------------------------------------------------------------------
 
 // Read Perspective API key
 function getPerspectiveApiKey() {
@@ -56,7 +62,27 @@ async function approveAndRoutePendingContent(snap, data, scores) {
   const contextId = data.contextId; // threadId
 
   const batch = db.batch();
-  let targetRef = null;
+
+  // ✅ Resolve senderName from /users/{uid}
+  let senderName = "Someone";
+  let senderPhotoUrl = "";
+  try {
+    const userDoc = await db.collection("users").doc(userId).get();
+    if (userDoc.exists) {
+      const u = userDoc.data() || {};
+      senderName =
+        u.displayName ||
+        u.name ||
+        u.fullName ||
+        u.username ||
+        u.userName ||
+        senderName;
+
+      senderPhotoUrl = u.photoUrl || u.avatarUrl || u.profilePhoto || "";
+    }
+  } catch (e) {
+    console.warn("Failed to resolve sender profile:", e);
+  }
 
   switch (kind) {
     case "CHAT_MESSAGE": {
@@ -65,22 +91,61 @@ async function approveAndRoutePendingContent(snap, data, scores) {
         break;
       }
 
-      targetRef = db.collection("chat_messages").doc();
+      // ✅ Load thread participants to compute receivers
+      const threadRef = db.collection("chatThreads").doc(contextId);
+      const threadSnap = await threadRef.get();
+      if (!threadSnap.exists) {
+        console.warn("Thread not found:", contextId);
+        break;
+      }
 
-      batch.set(targetRef, {
+      const thread = threadSnap.data() || {};
+      let participants = Array.isArray(thread.participants) ? thread.participants : [];
+
+      // legacy fallback
+      if (!participants.length) {
+        const userA = thread.userA;
+        const userB = thread.userB;
+        if (userA && userB) participants = [userA, userB];
+      }
+
+      const receivers = participants.filter((uid) => uid && uid !== userId);
+
+      // ✅ Write message with let senderName =
+	  
+      const msgRef = db.collection("chat_messages").doc();
+      batch.set(msgRef, {
+        id: msgRef.id,
         threadId: contextId,
         senderId: userId,
+        senderName: senderName,
+        senderPhotoUrl: senderPhotoUrl,
         text: text,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         moderated: true,
         pendingId: contentId,
       });
+
+      // ✅ Update thread preview + timestamp
+      const nowMillis = Date.now();
+      batch.update(threadRef, {
+        lastMessage: text ? String(text).slice(0, 140) : "New message",
+        lastTimestamp: nowMillis,
+      });
+
+      // ✅ Increment unread counters for receivers; reset sender unread
+      const unreadUpdates = {};
+      unreadUpdates[`unread_${userId}`] = 0;
+      receivers.forEach((rid) => {
+        unreadUpdates[`unread_${rid}`] = admin.firestore.FieldValue.increment(1);
+      });
+      batch.set(threadRef, unreadUpdates, { merge: true });
+
       break;
     }
-
-    // Future: FEED_POST, USER_BIO, GROUP_DESC, etc.
   }
 
+  // ✅ Mark pending approved
   batch.update(snap.ref, {
     status: "approved",
     approvedAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -89,6 +154,7 @@ async function approveAndRoutePendingContent(snap, data, scores) {
 
   await batch.commit();
 }
+
 
 /**
  * Main moderation function:
@@ -185,5 +251,289 @@ exports.onPendingContentCreate = functions.firestore
       sexual,
     });
 
+    return null;
+  });
+
+// ----------------------------------------------------------------------------
+// TOGETHERLY PUSH NOTIFICATIONS (Step 2)
+// ----------------------------------------------------------------------------
+
+async function getChatPref(uid) {
+  try {
+    const prefSnap = await db
+      .collection("users")
+      .doc(uid)
+      .collection("notificationPrefs")
+      .doc("default")
+      .get();
+
+    if (!prefSnap.exists) return "ALL";
+    const chat = (prefSnap.data() && prefSnap.data().chat) || "ALL";
+    return typeof chat === "string" ? chat : "ALL";
+  } catch (e) {
+    console.warn("getChatPref failed for", uid, e);
+    return "ALL";
+  }
+}
+
+async function getUserTokens(uid) {
+  try {
+    const tokensSnap = await db
+      .collection("users")
+      .doc(uid)
+      .collection("fcmTokens")
+      .get();
+
+    const tokens = [];
+    tokensSnap.forEach((d) => {
+      const val = (d.data() && d.data().token) || d.id;
+      if (typeof val === "string" && val.length > 10) tokens.push(val);
+    });
+
+    return Array.from(new Set(tokens));
+  } catch (e) {
+    console.warn("getUserTokens failed for", uid, e);
+    return [];
+  }
+}
+
+async function cleanupInvalidTokens(uid, invalidTokens) {
+  if (!invalidTokens || !invalidTokens.length) return;
+
+  try {
+    const snap = await db.collection("users").doc(uid).collection("fcmTokens").get();
+    const batch = db.batch();
+
+    snap.forEach((doc) => {
+      const data = doc.data() || {};
+      const token = data.token || doc.id;
+      if (invalidTokens.includes(token)) {
+        batch.delete(doc.ref);
+      }
+    });
+
+    await batch.commit();
+  } catch (e) {
+    console.warn("cleanupInvalidTokens failed for", uid, e);
+  }
+}
+
+async function writeBellInbox(uid, item) {
+  try {
+    const docRef = db.collection("users").doc(uid).collection("notifications").doc();
+    await docRef.set({
+      id: docRef.id,
+      category: item.category || "CHAT",
+      importance: item.importance || "CRITICAL",
+      type: item.type || "chat_message",
+      title: item.title || "Togetherly",
+      body: item.body || "",
+      deepLink: item.deepLink || "",
+      entityId: item.entityId || "",
+
+      // ✅ add these (fixes "Someone" permanently + faster UI)
+      threadId: item.threadId || "",
+      senderId: item.senderId || "",
+
+      read: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn("writeBellInbox failed for", uid, e);
+  }
+}
+async function resolveUserDisplayName(uid, fallback = "Someone") {
+  try {
+    const u = await db.collection("users").doc(uid).get();
+    if (!u.exists) return fallback;
+    const d = u.data() || {};
+    return (
+      d.displayName ||
+      d.name ||
+      d.fullName ||
+      d.username ||
+      d.email ||
+      d.phone ||
+      fallback
+    );
+  } catch (e) {
+    return fallback;
+  }
+}
+
+
+/**
+ * Trigger: chat_messages/{messageId}
+ * - Writes Bell inbox ALWAYS
+ * - Sends push only if receiver chat pref != "OFF"
+ *
+ * IMPORTANT:
+ * For killed-app notifications: send BOTH "notification" + "data".
+ */
+exports.onChatMessageCreate = functions.firestore
+  .document("chat_messages/{messageId}")
+  .onCreate(async (snap, context) => {
+    const msg = snap.data();
+    if (!msg) return null;
+
+    const threadId = msg.threadId;
+    const senderId = msg.senderId || "";
+    if (!threadId || !senderId) return null;
+
+    console.log(
+      "onChatMessageCreate fired:",
+      context.params.messageId,
+      "thread:",
+      threadId
+    );
+
+    // ✅ Load thread ONCE
+    const threadRef = db.collection("chatThreads").doc(threadId);
+    const threadSnap = await threadRef.get();
+    if (!threadSnap.exists) {
+      console.warn("Thread not found:", threadId);
+      return null;
+    }
+
+    const thread = threadSnap.data() || {};
+
+    // ✅ Resolve senderName SAFELY
+    let senderName =
+      msg.senderName ||
+      (thread.userA === senderId ? thread.userAName : null) ||
+      (thread.userB === senderId ? thread.userBName : null) ||
+      null;
+
+    if (!senderName) {
+      senderName = await resolveUserDisplayName(senderId, "Someone");
+    }
+
+    const text = msg.text || "";
+
+    // ✅ Participants
+    let participants = Array.isArray(thread.participants)
+      ? thread.participants
+      : [];
+
+    // legacy fallback
+    if (!participants.length) {
+      const userA = thread.userA;
+      const userB = thread.userB;
+      if (userA && userB) participants = [userA, userB];
+    }
+
+    const receivers = participants.filter(
+      (uid) => uid && uid !== senderId
+    );
+    if (!receivers.length) return null;
+
+    const isGroup = participants.length > 2;
+    const title = isGroup ? `${senderName} (Group)` : senderName;
+    const body =
+      text && typeof text === "string"
+        ? text.slice(0, 140)
+        : "New message";
+
+    const deepLink = `togetherly://chat/${threadId}`;
+
+    // ✅ 1) Update unread counters + preview
+    try {
+      const update = {
+        lastMessage: body,
+        lastTimestamp: admin.firestore.FieldValue.serverTimestamp(),
+      };
+
+      receivers.forEach((uid) => {
+        update[`unread_${uid}`] =
+          admin.firestore.FieldValue.increment(1);
+      });
+
+      await threadRef.set(update, { merge: true });
+    } catch (e) {
+      console.warn(
+        "Failed updating chatThreads unread/last fields",
+        threadId,
+        e
+      );
+    }
+
+    // ✅ 2) Bell inbox + push
+    const jobs = receivers.map(async (uid) => {
+      // 🔔 Bell inbox ALWAYS
+      await writeBellInbox(uid, {
+        category: "CHAT",
+        importance: "CRITICAL",
+        type: "chat_message",
+        title,
+        body,
+        deepLink,
+        entityId: threadId,
+        threadId,
+        senderId,
+      });
+
+      const chatPref = await getChatPref(uid);
+      if (chatPref === "OFF") return null;
+
+      const tokens = await getUserTokens(uid);
+      if (!tokens.length) {
+        console.log("No tokens for receiver:", uid);
+        return null;
+      }
+
+      const dataPayload = {
+        type: "chat_message",
+        threadId: String(threadId),
+        senderId: String(senderId),
+        senderName: String(senderName),
+        isGroup: String(isGroup),
+        deepLink: String(deepLink),
+        open_chat_thread_id: String(threadId),
+        title: String(title),
+        body: String(body),
+      };
+
+      try {
+        const resp = await admin.messaging().sendEachForMulticast({
+          tokens,
+          notification: {
+            title: String(title),
+            body: String(body),
+          },
+          data: dataPayload,
+          android: {
+            priority: "high",
+            notification: {
+              channelId: "chat_messages",
+              sound: "default",
+            },
+          },
+        });
+
+        const invalid = [];
+        resp.responses.forEach((r, i) => {
+          if (!r.success) {
+            const code = r.error?.code || "";
+            if (
+              code === "messaging/invalid-registration-token" ||
+              code === "messaging/registration-token-not-registered"
+            ) {
+              invalid.push(tokens[i]);
+            }
+          }
+        });
+
+        if (invalid.length) {
+          await cleanupInvalidTokens(uid, invalid);
+        }
+
+        return resp;
+      } catch (e) {
+        console.error("FCM send failed for", uid, e);
+        return null;
+      }
+    });
+
+    await Promise.all(jobs);
     return null;
   });

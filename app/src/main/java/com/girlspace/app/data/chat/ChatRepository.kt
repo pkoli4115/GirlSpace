@@ -6,6 +6,7 @@ import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.tasks.await
+import java.util.Date
 
 class ChatRepository(
     private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
@@ -17,12 +18,43 @@ class ChatRepository(
     private val messagesRef = firestore.collection("chat_messages")  // <- SAME as your existing
 
     private fun currentUid(): String = auth.currentUser?.uid ?: ""
-    private fun currentName(): String = auth.currentUser?.displayName ?: "GirlSpace user"
+
+    private suspend fun currentName(): String {
+        val uid = currentUid()
+        val authName = auth.currentUser?.displayName
+        if (!authName.isNullOrBlank()) return authName
+
+        return try {
+            val doc = firestore.collection("users").document(uid).get().await()
+            doc.getString("displayName")
+                ?: doc.getString("name")
+                ?: doc.getString("fullName")
+                ?: doc.getString("username")
+                ?: doc.getString("userName")
+                ?: "Someone"
+        } catch (_: Exception) {
+            "Someone"
+        }
+    }
+
+    // ------------------------------------------
+    // 🔹 Safe timestamp reader (Long OR Timestamp)
+    // ------------------------------------------
+    private fun Any?.toMillisSafe(): Long {
+        return when (this) {
+            is Long -> this
+            is Int -> this.toLong()
+            is Double -> this.toLong()
+            is Float -> this.toLong()
+            is Timestamp -> this.toDate().time
+            is Date -> this.time
+            else -> 0L
+        }
+    }
 
     // -------------------------------------------------------------------------
     // THREADS
     // -------------------------------------------------------------------------
-
     fun observeThreads(onUpdate: (List<ChatThread>) -> Unit): ListenerRegistration {
         val uid = currentUid()
         if (uid.isEmpty()) {
@@ -40,7 +72,10 @@ class ChatRepository(
                     return@addSnapshotListener
                 }
 
-                val list = snap?.documents?.map { doc ->
+                val list: List<ChatThread> = snap?.documents?.map { doc ->
+                    // ✅ Key fix: lastTimestamp may be Timestamp OR Long in Firestore
+                    val lastTsMillis = doc.get("lastTimestamp").toMillisSafe()
+
                     ChatThread(
                         id = doc.id,
                         userA = doc.getString("userA") ?: "",
@@ -48,7 +83,7 @@ class ChatRepository(
                         userAName = doc.getString("userAName") ?: "",
                         userBName = doc.getString("userBName") ?: "",
                         lastMessage = doc.getString("lastMessage") ?: "",
-                        lastTimestamp = doc.getLong("lastTimestamp") ?: 0L,
+                        lastTimestamp = lastTsMillis,
                         unreadCount = (doc.get("unread_$uid") as? Long)?.toInt() ?: 0
                     )
                 } ?: emptyList()
@@ -56,6 +91,23 @@ class ChatRepository(
                 // Newest chats first
                 onUpdate(list.sortedByDescending { it.lastTimestamp })
             }
+    }
+
+    /**
+     * ✅ Mark a thread as read for current user (WhatsApp style):
+     * sets chatThreads/{threadId}.unread_{uid} = 0
+     */
+    suspend fun markThreadRead(threadId: String) {
+        val uid = currentUid()
+        if (uid.isBlank()) return
+
+        try {
+            threadsRef.document(threadId)
+                .update("unread_$uid", 0L)
+                .await()
+        } catch (e: Exception) {
+            Log.w("ChatRepository", "markThreadRead failed", e)
+        }
     }
 
     /**
@@ -118,7 +170,7 @@ class ChatRepository(
             "userBName" to otherName,
             "participants" to listOf(myId, otherId),
             "lastMessage" to "",
-            "lastTimestamp" to now,
+            "lastTimestamp" to now, // keep as Long (your existing)
             "unread_$myId" to 0L,
             "unread_$otherId" to 0L
         )
@@ -168,12 +220,6 @@ class ChatRepository(
 
     /**
      * Send a message in a thread.
-     *
-     * - text: regular text content
-     * - mediaUrl/mediaType: for images, videos, audio, files
-     * - replyTo: messageId being replied to (for reply UI)
-     * - audioDuration: for voice messages (ms)
-     * - mediaThumbnail: preview image URL for video (optional)
      */
     suspend fun sendMessage(
         threadId: String,
@@ -186,15 +232,12 @@ class ChatRepository(
         extra: Map<String, Any>? = null
     ) {
         val uid = currentUid()
-        val name = currentName()
+        val name = currentName() // now suspend-safe + real name
         if (uid.isEmpty()) throw IllegalStateException("Not logged in")
 
         val msgDoc = messagesRef.document()
         val now = Timestamp.now()
 
-        // -------------------------------------------------
-        // Build base message payload
-        // -------------------------------------------------
         val msgData = mutableMapOf<String, Any?>(
             "id" to msgDoc.id,
             "threadId" to threadId,
@@ -211,23 +254,14 @@ class ChatRepository(
             "mediaThumbnail" to mediaThumbnail
         )
 
-        // -------------------------------------------------
-        // ⭐ ADD: extra map for CONTACT & LOCATION messages
-        // -------------------------------------------------
         if (extra != null) {
             msgData["extra"] = extra
         }
 
-        // -------------------------------------------------
-        // Firestore cleans null values
-        // -------------------------------------------------
         val cleaned = msgData.filterValues { it != null }
 
         msgDoc.set(cleaned).await()
 
-        // -------------------------------------------------
-        // Update thread summary bubble (ChatsScreen preview)
-        // -------------------------------------------------
         val preview: String = when (mediaType) {
             "image" -> "[Image]"
             "video" -> "[Video]"
@@ -238,6 +272,7 @@ class ChatRepository(
             else -> if (text.isNotBlank()) text else "[Message]"
         }
 
+        // Keep your original long timestamp update (Cloud Function will also set serverTimestamp)
         threadsRef.document(threadId).update(
             mapOf(
                 "lastMessage" to preview,
@@ -245,7 +280,6 @@ class ChatRepository(
             )
         ).await()
     }
-
 
     // -------------------------------------------------------------------------
     // REACTIONS
@@ -267,7 +301,7 @@ class ChatRepository(
             val updated = current.toMutableMap()
 
             if (updated[userId] == emoji) {
-                updated.remove(userId) // tap same emoji → remove
+                updated.remove(userId)
             } else {
                 updated[userId] = emoji
             }
@@ -288,8 +322,8 @@ class ChatRepository(
             userAName = getString("userAName") ?: "",
             userBName = getString("userBName") ?: "",
             lastMessage = getString("lastMessage") ?: "",
-            lastTimestamp = getLong("lastTimestamp") ?: 0L,
-            unreadCount = 0 // per-user unread can be computed client-side later
+            lastTimestamp = get("lastTimestamp").toMillisSafe(),
+            unreadCount = 0
         )
     }
 
@@ -298,15 +332,12 @@ class ChatRepository(
             @Suppress("UNCHECKED_CAST")
             val reactionsMap = get("reactions") as? Map<String, String> ?: emptyMap()
 
-            // --- Soft-delete normalization (for legacy data) ---
             val rawText = getString("text") ?: ""
             val legacyDeleted = rawText == "This message was deleted"
 
-            // New explicit flags
             val deletedForAllFlag = getBoolean("deletedForAll") ?: legacyDeleted
             val deletedForList = (get("deletedFor") as? List<String>) ?: emptyList()
 
-            // If deletedForAll → null out media fields client-side
             val isDeletedCompletely = deletedForAllFlag
 
             val finalMediaUrl = if (isDeletedCompletely) null else getString("mediaUrl")
@@ -314,17 +345,12 @@ class ChatRepository(
             val finalMediaThumb = if (isDeletedCompletely) null else getString("mediaThumbnail")
             val finalAudioDuration = if (isDeletedCompletely) null else getLong("audioDuration")
 
-            // 🔹 Extra payload (location / contact / etc.)
             @Suppress("UNCHECKED_CAST")
             val extraPayload: Map<String, Any>? =
-                if (isDeletedCompletely) {
-                    null
-                } else {
-                    get("extra") as? Map<String, Any>
-                }
+                if (isDeletedCompletely) null else get("extra") as? Map<String, Any>
 
             ChatMessage(
-                id = getString("id") ?: id,      // fall back to doc.id
+                id = getString("id") ?: id,
                 threadId = getString("threadId") ?: "",
                 senderId = getString("senderId") ?: "",
                 senderName = getString("senderName") ?: "",
@@ -341,11 +367,9 @@ class ChatRepository(
                 deletedForAll = deletedForAllFlag,
                 deletedFor = deletedForList
             )
-
         } catch (e: Exception) {
             Log.e("ChatRepository", "toChatMessage failed", e)
             null
         }
     }
-
 }

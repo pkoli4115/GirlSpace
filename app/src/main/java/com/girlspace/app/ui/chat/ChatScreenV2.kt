@@ -8,6 +8,7 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import com.google.firebase.Firebase
+import com.girlspace.app.notifications.ActiveChatTracker
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
@@ -209,6 +210,13 @@ fun ChatScreenV2(
     val friends by vm.friends.collectAsState()
 
     val context = LocalContext.current
+    LaunchedEffect(threadId) {
+        ActiveChatTracker.setActiveThread(context, threadId)
+    }
+    DisposableEffect(threadId) {
+        onDispose { ActiveChatTracker.clear(context) }
+    }
+
     val activity = context as? Activity
     val currentUid = FirebaseAuth.getInstance().currentUser?.uid
     val firestore = remember { FirebaseFirestore.getInstance() }

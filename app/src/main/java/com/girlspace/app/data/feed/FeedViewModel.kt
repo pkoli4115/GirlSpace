@@ -1,5 +1,7 @@
 package com.girlspace.app.ui.feed
+import com.girlspace.app.moderation.ImageModerationResult
 import com.girlspace.app.moderation.ModerationManager
+import com.girlspace.app.moderation.ImageModerator
 import com.girlspace.app.moderation.ContentKind
 import com.google.firebase.firestore.FieldValue
 import android.content.Context
@@ -22,6 +24,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class FeedViewModel : ViewModel() {
+    private val imageModerator = ImageModerator()
 
     private val firestore = FirebaseFirestore.getInstance()
     private val repo = FeedRepository(
@@ -251,36 +254,12 @@ class FeedViewModel : ViewModel() {
             return
         }
 
-        // 3) Moderation + decode images + create post
+        // 3) Decode images + IMAGE MODERATION + create post
         viewModelScope.launch {
             try {
                 val trimmedText = text.trim()
 
-                // 🔍 Run moderation only if there is some text
-                if (trimmedText.isNotEmpty()) {
-                    try {
-                        val moderationResult = moderationManager.submitTextForModeration(
-                            rawText = trimmedText,
-                            kind = ContentKind.FEED_POST,
-                            contextId = null // optional: could be "feed_composer"
-                        )
-
-                        if (moderationResult.blockedLocally) {
-                            _isCreating.value = false
-                            _errorMessage.value = moderationResult.message
-                                ?: "Post blocked by community guidelines."
-                            return@launch
-                        }
-                        // If success/failed but not blockedLocally, we still continue:
-                        //  - success → logged to pending_content for AI review
-                        //  - failure → just log and continue posting
-                    } catch (e: Exception) {
-                        Log.e("FeedViewModel", "Moderation failed for post", e)
-                        // Do NOT block post just because moderation logging failed
-                    }
-                }
-
-                // Decode images
+                // Decode images first
                 val bitmaps = withContext(Dispatchers.IO) {
                     imageUris.mapNotNull { uri ->
                         try {
@@ -294,7 +273,21 @@ class FeedViewModel : ViewModel() {
                     }
                 }
 
-                // Create post as before
+                // 🔍 Image moderation: only if there are bitmaps
+                if (bitmaps.isNotEmpty()) {
+                    val imageResult: ImageModerationResult =
+                        imageModerator.checkBitmaps(bitmaps)
+
+                    if (!imageResult.isSafe) {
+                        _isCreating.value = false
+                        _errorMessage.value =
+                            "One or more images may contain nudity or violence. " +
+                                    "Please choose different images."
+                        return@launch
+                    }
+                }
+
+                // ✅ Create post as before
                 repo.createPost(
                     text = trimmedText,
                     bitmaps = bitmaps

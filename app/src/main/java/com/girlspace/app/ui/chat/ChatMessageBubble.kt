@@ -2,6 +2,12 @@
 // File: ChatMessageBubble.kt
 
 package com.girlspace.app.ui.chat
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
@@ -61,8 +67,34 @@ fun ChatMessageBubble(
     onMoreReactions: () -> Unit
 ) {
     val chatColors = ChatThemeDefaults.colors
-    val senderName = message.senderName.ifBlank { "User" }
+    val firestore = remember { FirebaseFirestore.getInstance() }
 
+// Start with what message has
+    var resolvedSenderName by remember(message.id) {
+        mutableStateOf(message.senderName.ifBlank { "User" })
+    }
+
+// ✅ If incoming message and name looks generic, resolve from /users/{senderId}
+    LaunchedEffect(message.id, mine) {
+        if (mine) return@LaunchedEffect
+        val current = resolvedSenderName.trim()
+        if (current.isNotBlank() && current.lowercase() != "girlspace user" && current.lowercase() != "someone") {
+            return@LaunchedEffect
+        }
+
+        val uid = message.senderId
+        if (uid.isBlank()) return@LaunchedEffect
+
+        runCatching {
+            val userDoc = firestore.collection("users").document(uid).get().await()
+            val name =
+                userDoc.getString("displayName")
+                    ?: userDoc.getString("name")
+                    ?: userDoc.getString("fullName")
+                    ?: userDoc.getString("username")
+            if (!name.isNullOrBlank()) resolvedSenderName = name
+        }
+    }
     val sdf = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
     val timeText = remember(message.createdAt) {
         runCatching { sdf.format(message.createdAt.toDate()) }.getOrNull() ?: ""
@@ -143,7 +175,7 @@ fun ChatMessageBubble(
                     // Sender name (for incoming messages in group or 1:1)
                     if (!mine) {
                         Text(
-                            text = senderName,
+                            text = resolvedSenderName,
                             style = MaterialTheme.typography.labelSmall,
                             color = chatColors.textSecondary,
                             fontWeight = FontWeight.SemiBold,

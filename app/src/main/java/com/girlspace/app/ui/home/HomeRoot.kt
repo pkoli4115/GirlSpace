@@ -1,4 +1,20 @@
 package com.girlspace.app.ui.home
+
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.draw.clip
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.girlspace.app.ui.chat.ChatViewModel
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.IconButton
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -69,6 +85,9 @@ fun HomeRoot(
 
     var currentTab by remember { mutableStateOf(HomeTab.Feed) }
     var showCreatePost by remember { mutableStateOf(false) }
+    val chatVm: ChatViewModel = viewModel()
+    val threads by chatVm.threads.collectAsState()
+    val totalUnreadChats = remember(threads) { threads.sumOf { it.unreadCount } }
 
     val selectedColor = MaterialTheme.colorScheme.primary
     val unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -90,9 +109,21 @@ fun HomeRoot(
     }
 
     Scaffold(
+        topBar = {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.End
+            ) {
+                NotificationBell {
+                    navController.navigate("notifications")
+                }
+            }
+        },
         bottomBar = {
             NavigationBar {
-                // Home
+                // Feed (HOME)
                 NavigationBarItem(
                     selected = currentTab == HomeTab.Feed,
                     onClick = {
@@ -102,7 +133,7 @@ fun HomeRoot(
                     },
                     icon = {
                         Icon(
-                            imageVector = Icons.Filled.Home,
+                            imageVector = Icons.Filled.Home, // ✅ HOME icon
                             contentDescription = "Home",
                             tint = if (currentTab == HomeTab.Feed) selectedColor else unselectedColor
                         )
@@ -137,13 +168,19 @@ fun HomeRoot(
                         }
                     },
                     icon = {
-                        Icon(
-                            imageVector = Icons.Filled.Chat,
-                            contentDescription = "Chats",
-                            tint = if (currentTab == HomeTab.Chats) selectedColor else unselectedColor
+                        BadgedNavIcon(
+                            icon = {
+                                Icon(
+                                    imageVector = Icons.Filled.Chat,
+                                    contentDescription = "Chats",
+                                    tint = if (currentTab == HomeTab.Chats) selectedColor else unselectedColor
+                                )
+                            },
+                            badgeCount = totalUnreadChats
                         )
                     },
-                    alwaysShowLabel = false
+
+                            alwaysShowLabel = false
                 )
 
                 // Friends (two-person outline)
@@ -201,7 +238,7 @@ fun HomeRoot(
                 )
             }
         },
-      ) { padding ->
+    ) { padding ->
         Box(
             modifier = Modifier
                 .padding(padding)
@@ -351,6 +388,112 @@ private fun FriendsTab() {
         }
     }
 }
+
+@Composable
+private fun BadgedNavIcon(
+    icon: @Composable () -> Unit,
+    badgeCount: Int
+) {
+    Box {
+        icon()
+
+        if (badgeCount > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 2.dp, end = 2.dp)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(Color.Red),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (badgeCount > 9) "9+" else badgeCount.toString(),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White
+                )
+            }
+        }
+    }
+}
+@Composable
+private fun NotificationBell(
+    onClick: () -> Unit
+) {
+    val auth = remember { FirebaseAuth.getInstance() }
+    val firestore = remember { FirebaseFirestore.getInstance() }
+
+    val uid = auth.currentUser?.uid
+    var unreadCount by remember(uid) { mutableStateOf(0) }
+
+    // Attach listener only when uid exists; otherwise keep badge at 0 but still show bell icon.
+    androidx.compose.runtime.DisposableEffect(uid) {
+        if (uid.isNullOrBlank()) {
+            unreadCount = 0
+            onDispose { }
+        } else {
+            val reg = firestore.collection("users")
+                .document(uid)
+                .collection("notifications")
+                .addSnapshotListener { snap, err ->
+                    if (err != null) {
+                        // fail-open: don’t crash or hide icon
+                        unreadCount = 0
+                        return@addSnapshotListener
+                    }
+
+                    val docs = snap?.documents.orEmpty()
+
+                    // Backward compatible:
+                    // - read:Boolean (your intended)
+                    // - isRead:Boolean (common variant)
+                    // - missing field => treat as unread (so it still shows in badge)
+                    unreadCount = docs.count { d ->
+                        val read = d.getBoolean("read")
+                        val isRead = d.getBoolean("isRead")
+                        val isSeen = d.getBoolean("seen")
+
+                        when {
+                            read != null -> read == false
+                            isRead != null -> isRead == false
+                            isSeen != null -> isSeen == false
+                            else -> true // no flag -> consider unread (safer for badge)
+                        }
+                    }
+                }
+
+            onDispose { reg.remove() }
+        }
+    }
+
+    Box {
+        IconButton(onClick = onClick) {
+            Icon(
+                imageVector = Icons.Filled.Notifications,
+                contentDescription = "Notifications"
+            )
+        }
+
+        if (unreadCount > 0) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 6.dp, end = 6.dp)
+                    .size(18.dp)
+                    .clip(CircleShape)
+                    .background(Color.Red),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (unreadCount > 9) "9+" else unreadCount.toString(),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        }
+    }
+}
+
 
 // ---- Menu Tab ----
 
