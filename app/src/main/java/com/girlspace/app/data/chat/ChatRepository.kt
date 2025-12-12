@@ -3,6 +3,7 @@ package com.girlspace.app.data.chat
 import android.util.Log
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.tasks.await
@@ -52,6 +53,16 @@ class ChatRepository(
         }
     }
 
+    private fun DocumentSnapshot.getMillis(field: String): Long {
+        val v = get(field)
+        return when (v) {
+            is Long -> v
+            is Timestamp -> v.toDate().time
+            is Date -> v.time
+            else -> 0L
+        }
+    }
+
     // -------------------------------------------------------------------------
     // THREADS
     // -------------------------------------------------------------------------
@@ -72,9 +83,10 @@ class ChatRepository(
                     return@addSnapshotListener
                 }
 
-                val list: List<ChatThread> = snap?.documents?.map { doc ->
-                    // ✅ Key fix: lastTimestamp may be Timestamp OR Long in Firestore
-                    val lastTsMillis = doc.get("lastTimestamp").toMillisSafe()
+                val list = snap?.documents?.map { doc ->
+                    val lastTsMillis =
+                        // support both lastTimestamp + lastTimestampMillis if you ever add it
+                        (doc.get("lastTimestamp") ?: doc.get("lastTimestampMillis")).toMillisSafe()
 
                     ChatThread(
                         id = doc.id,
@@ -170,7 +182,7 @@ class ChatRepository(
             "userBName" to otherName,
             "participants" to listOf(myId, otherId),
             "lastMessage" to "",
-            "lastTimestamp" to now, // keep as Long (your existing)
+            "lastTimestamp" to now, // keep Long for fast sort (your UI supports Long)
             "unread_$myId" to 0L,
             "unread_$otherId" to 0L
         )
@@ -210,8 +222,8 @@ class ChatRepository(
                 val list = snap
                     ?.documents
                     ?.mapNotNull { it.toChatMessage() }
-                    // Sort on client to keep them in chronological order
-                    ?.sortedBy { it.createdAt.seconds }
+                    // ✅ sort by millis (works even if createdAt was Long/Date/Timestamp)
+                    ?.sortedBy { it.createdAt.toDate().time }
                     ?: emptyList()
 
                 onUpdate(list)
@@ -232,7 +244,7 @@ class ChatRepository(
         extra: Map<String, Any>? = null
     ) {
         val uid = currentUid()
-        val name = currentName() // now suspend-safe + real name
+        val name = currentName() // suspend-safe + real name
         if (uid.isEmpty()) throw IllegalStateException("Not logged in")
 
         val msgDoc = messagesRef.document()
@@ -259,7 +271,6 @@ class ChatRepository(
         }
 
         val cleaned = msgData.filterValues { it != null }
-
         msgDoc.set(cleaned).await()
 
         val preview: String = when (mediaType) {
@@ -269,6 +280,7 @@ class ChatRepository(
             "location" -> extra?.get("address")?.toString() ?: "[Location]"
             "live_location" -> "Live Location"
             "contact" -> extra?.get("name")?.toString() ?: "[Contact]"
+            "file" -> if (text.isNotBlank()) text else "[File]"
             else -> if (text.isNotBlank()) text else "[Message]"
         }
 
@@ -314,7 +326,7 @@ class ChatRepository(
     // HELPERS
     // -------------------------------------------------------------------------
 
-    private fun com.google.firebase.firestore.DocumentSnapshot.toChatThread(): ChatThread {
+    private fun DocumentSnapshot.toChatThread(): ChatThread {
         return ChatThread(
             id = id,
             userA = getString("userA") ?: "",
@@ -322,12 +334,12 @@ class ChatRepository(
             userAName = getString("userAName") ?: "",
             userBName = getString("userBName") ?: "",
             lastMessage = getString("lastMessage") ?: "",
-            lastTimestamp = get("lastTimestamp").toMillisSafe(),
+            lastTimestamp = (get("lastTimestamp") ?: get("lastTimestampMillis")).toMillisSafe(),
             unreadCount = 0
         )
     }
 
-    private fun com.google.firebase.firestore.DocumentSnapshot.toChatMessage(): ChatMessage? {
+    private fun DocumentSnapshot.toChatMessage(): ChatMessage? {
         return try {
             @Suppress("UNCHECKED_CAST")
             val reactionsMap = get("reactions") as? Map<String, String> ?: emptyMap()
@@ -349,6 +361,13 @@ class ChatRepository(
             val extraPayload: Map<String, Any>? =
                 if (isDeletedCompletely) null else get("extra") as? Map<String, Any>
 
+            // ✅ robust createdAt parse: Timestamp OR Long OR Date
+            val createdAtTs: Timestamp = getTimestamp("createdAt")
+                ?: run {
+                    val ms = get("createdAt").toMillisSafe()
+                    if (ms > 0L) Timestamp(Date(ms)) else Timestamp.now()
+                }
+
             ChatMessage(
                 id = getString("id") ?: id,
                 threadId = getString("threadId") ?: "",
@@ -360,7 +379,7 @@ class ChatRepository(
                 mediaThumbnail = finalMediaThumb,
                 audioDuration = finalAudioDuration,
                 replyTo = getString("replyTo"),
-                createdAt = getTimestamp("createdAt") ?: Timestamp.now(),
+                createdAt = createdAtTs,
                 readBy = (get("readBy") as? List<String>) ?: emptyList(),
                 reactions = reactionsMap,
                 extra = extraPayload,

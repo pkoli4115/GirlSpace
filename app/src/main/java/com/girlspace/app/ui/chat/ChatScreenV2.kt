@@ -7,6 +7,8 @@ package com.girlspace.app.ui.chat
 // - Adds: WA-style selection bar, camera in bottom bar, real location/contact
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
+import java.util.Calendar
+import java.security.Timestamp
 import com.google.firebase.Firebase
 import com.girlspace.app.notifications.ActiveChatTracker
 import androidx.compose.runtime.rememberUpdatedState
@@ -151,6 +153,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
+import androidx.compose.foundation.lazy.itemsIndexed
+import java.util.Date
 // Shared formatter for chat timestamps (HH:mm)
 private val CHAT_TIME_FORMATTER: SimpleDateFormat =
     SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -1608,14 +1612,36 @@ fun ChatScreenV2(
                     verticalArrangement = Arrangement.spacedBy(6.dp),
                     state = listState
                 ) {
-                    items(
+                    itemsIndexed(
                         items = messages,
-                        key = { it.id },
-                        contentType = { msg ->
-                            // Hint to Compose so it can reuse views more smartly
-                            msg.mediaType ?: "text"
+                        key = { _, it -> it.id },
+                        contentType = { _, msg ->
+                            when {
+                                msg.deletedForAll -> "deleted"
+                                msg.mediaType != null -> "media"
+                                msg.replyTo != null -> "reply"
+                                else -> "text"
+                            }
                         }
-                    ) { msg ->
+                    ) { index, msg ->
+
+                        val prev = messages.getOrNull(index - 1)
+                        val showDateHeader =
+                            prev == null ||
+                                    timestampToDayKey(prev.createdAt) != timestampToDayKey(msg.createdAt)
+
+                        if (showDateHeader) {
+                            Text(
+                                text = formatDateHeader(msg.createdAt),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                                textAlign = TextAlign.Center,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
                         val mine = msg.senderId == currentUid
                         val isSelected = selectedMessageIds.contains(msg.id)
                         val isHighlighted = (msg.id == highlightedMessageId)
@@ -1829,6 +1855,25 @@ fun ChatScreenV2(
                         textStyle = MaterialTheme.typography.bodyMedium,
                         shape = RoundedCornerShape(20.dp),
                         colors = OutlinedTextFieldDefaults.colors()
+                    )
+
+                    // @mentions (simple inline autocomplete)
+                    MentionSuggestDropdown(
+                        input = inputText,
+                        friends = friends,
+                        onPick = { displayName ->
+                            // Insert mention at cursor end (simple + safe)
+                            val safe = displayName.trim().replace("\\s+".toRegex(), "")
+                            val replacement = "@$safe "
+                            val base = inputText
+                            val atIndex = base.lastIndexOf('@')
+                            val newText = if (atIndex >= 0) {
+                                base.substring(0, atIndex) + replacement
+                            } else {
+                                base + replacement
+                            }
+                            vm.setInputText(newText)
+                        }
                     )
 
                     Spacer(modifier = Modifier.width(4.dp))
@@ -2929,4 +2974,134 @@ private fun PinnedMessagesBar(
             )
         }
     }
+}
+
+private fun formatDayKey(ts: com.google.firebase.Timestamp?): String {
+    val millis = (ts?.seconds ?: 0L) * 1000L
+    val sdf = SimpleDateFormat("yyyyMMdd", Locale.getDefault())
+    return sdf.format(Date(millis))
+}
+
+private fun formatDayLabel(ts: com.google.firebase.Timestamp?): String {
+    val millis = (ts?.seconds ?: 0L) * 1000L
+    val sdf = SimpleDateFormat("EEE, dd MMM yyyy", Locale.getDefault())
+    return sdf.format(Date(millis))
+}
+
+@Composable
+private fun ChatDateHeader(label: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        }
+    }
+}
+
+private fun extractMentionQuery(input: String): String? {
+    // Find the last "@something" token user is typing
+    val at = input.lastIndexOf('@')
+    if (at < 0) return null
+    val tail = input.substring(at + 1)
+    // stop if whitespace/newline after '@'
+    if (tail.contains(' ') || tail.contains('\n') || tail.contains('\t')) return null
+    return tail.trim().takeIf { it.length >= 1 }
+}
+
+@Composable
+private fun MentionSuggestDropdown(
+    input: String,
+    friends: List<ChatUserSummary>,
+    onPick: (displayName: String) -> Unit
+) {
+    val q = extractMentionQuery(input)?.lowercase().orEmpty()
+    if (q.isBlank()) return
+
+    // Match by display name (strip spaces)
+    val matches = friends
+        .map { it.displayName }
+        .distinct()
+        .filter { it.isNotBlank() }
+        .filter { it.replace("\\s+".toRegex(), "").lowercase().startsWith(q) }
+        .take(6)
+
+    if (matches.isEmpty()) return
+
+    // Lightweight inline dropdown
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 6.dp),
+        shape = RoundedCornerShape(12.dp),
+        tonalElevation = 2.dp,
+        shadowElevation = 2.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(vertical = 6.dp)
+        ) {
+            matches.forEach { name ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onPick(name) }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "@${name.trim().replace("\\s+".toRegex(), "")}",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = name,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                    )
+                }
+            }
+        }
+    }
+}
+private fun timestampToDayKey(ts: com.google.firebase.Timestamp): String {
+    val cal = Calendar.getInstance()
+    cal.time = ts.toDate()
+
+    return "${cal.get(Calendar.YEAR)}-" +
+            "${cal.get(Calendar.MONTH)}-" +
+            "${cal.get(Calendar.DAY_OF_MONTH)}"
+}
+
+private fun formatDateHeader(ts: com.google.firebase.Timestamp): String {
+    val todayCal = Calendar.getInstance()
+
+    val msgCal = Calendar.getInstance()
+    msgCal.time = ts.toDate()
+
+    val sdf = SimpleDateFormat("dd MMM yyyy", Locale.getDefault())
+
+    return when {
+        isSameDay(todayCal, msgCal) -> "Today"
+        isSameDay(
+            todayCal.apply { add(Calendar.DAY_OF_YEAR, -1) },
+            msgCal
+        ) -> "Yesterday"
+        else -> sdf.format(msgCal.time)
+    }
+}
+
+private fun isSameDay(c1: Calendar, c2: Calendar): Boolean {
+    return c1.get(Calendar.YEAR) == c2.get(Calendar.YEAR) &&
+            c1.get(Calendar.DAY_OF_YEAR) == c2.get(Calendar.DAY_OF_YEAR)
 }

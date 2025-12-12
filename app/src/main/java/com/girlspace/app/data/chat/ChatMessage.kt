@@ -55,3 +55,15 @@ data class ChatMessage(
     val contactEmail: String?
         get() = extra?.get("email")?.toString()
 }
+
+/**
+ * Convenience accessors backed by `extra` (non-breaking; optional in Firestore).
+ *
+ * extra["tags"]     : List<String>
+ * extra["mentions"] : List<String> (e.g., ["alice", "bob"] without '@')
+ */
+val ChatMessage.tags: List<String>
+    get() = ((extra?.get("tags") as? List<*>)?.filterIsInstance<String>()).orEmpty()
+
+val ChatMessage.mentions: List<String>
+    get() = ((extra?.get("mentions") as? List<*>)?.filterIsInstance<String>()).orEmpty()

@@ -2,13 +2,15 @@
 // File: ChatMessageBubble.kt
 
 package com.girlspace.app.ui.chat
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.tasks.await
-
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
@@ -46,6 +48,51 @@ import coil.compose.AsyncImage
 import com.girlspace.app.data.chat.ChatMessage
 import java.text.SimpleDateFormat
 import java.util.Locale
+import androidx.compose.foundation.text.ClickableText
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.animation.animateColorAsState
+
+@OptIn(ExperimentalFoundationApi::class)
+private fun buildMentionAnnotatedText(
+    text: String,
+    mentionTag: String = "mention"
+): AnnotatedString {
+    if (text.isBlank()) return AnnotatedString(text)
+
+    // @username (letters/digits/underscore/dot)
+    val regex = Regex("(?<!\\w)@([A-Za-z0-9_\\.]{2,30})")
+    return buildAnnotatedString {
+        var last = 0
+        regex.findAll(text).forEach { m ->
+            val start = m.range.first
+            val endInclusive = m.range.last
+            if (start > last) {
+                append(text.substring(last, start))
+            }
+            val handle = m.groupValues.getOrNull(1).orEmpty()
+            val token = text.substring(start, endInclusive + 1) // includes '@'
+            val begin = length
+            append(token)
+            val end = length
+            addStyle(
+                style = SpanStyle(fontWeight = FontWeight.SemiBold),
+                start = begin,
+                end = end
+            )
+            // Store only the handle without '@'
+            addStringAnnotation(
+                tag = mentionTag,
+                annotation = handle,
+                start = begin,
+                end = end
+            )
+            last = endInclusive + 1
+        }
+        if (last < text.length) append(text.substring(last))
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -54,7 +101,7 @@ fun ChatMessageBubble(
     mine: Boolean,
     currentUserId: String?,
     isSelected: Boolean,
-    isHighlighted: Boolean,
+    isHighlighted: Boolean = false,
     showReactionStrip: Boolean,
     isPlayingAudio: Boolean,
     modifier: Modifier = Modifier,
@@ -68,6 +115,14 @@ fun ChatMessageBubble(
 ) {
     val chatColors = ChatThemeDefaults.colors
     val firestore = remember { FirebaseFirestore.getInstance() }
+    val highlightAlpha by animateFloatAsState(
+        targetValue = if (isHighlighted) 0.18f else 0f,
+        animationSpec = tween(durationMillis = 1200),
+        label = "replyHighlight"
+    )
+
+    val highlightColor =
+        MaterialTheme.colorScheme.primary.copy(alpha = highlightAlpha)
 
 // Start with what message has
     var resolvedSenderName by remember(message.id) {
@@ -114,11 +169,12 @@ fun ChatMessageBubble(
     val textColor = if (mine) chatColors.textOnMyBubble else chatColors.textPrimary
 
     // Highlight / selection overlay
-    val bgColor = when {
+    val targetBg = when {
         isSelected -> chatColors.selection.copy(alpha = 0.7f)
-        isHighlighted -> chatColors.selection.copy(alpha = 0.4f)
+        isHighlighted -> chatColors.selection.copy(alpha = 0.55f)
         else -> baseBg
     }
+    val bgColor by animateColorAsState(targetValue = targetBg, label = "bubbleBg")
 
     Row(
         modifier = modifier,
@@ -147,6 +203,15 @@ fun ChatMessageBubble(
             // Bubble itself
             Surface(
                 modifier = Modifier
+                    .background(
+                        color = highlightColor,
+                        shape = RoundedCornerShape(
+                            topStart = 18.dp,
+                            topEnd = 18.dp,
+                            bottomStart = if (mine) 18.dp else 4.dp,
+                            bottomEnd = if (mine) 4.dp else 18.dp
+                        )
+                    )
                     .shadow(
                         elevation = if (mine) 1.dp else 0.dp,
                         shape = RoundedCornerShape(
@@ -309,10 +374,50 @@ fun ChatMessageBubble(
                         }
 
                         body.isNotBlank() -> {
-                            Text(
-                                text = body,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = textColor
+                            // Optional tags (multi-tag) stored in extra["tags"] as List<String>
+                            val tags = ((message.extra?.get("tags") as? List<*>)?.filterIsInstance<String>()).orEmpty()
+                            if (tags.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(bottom = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    tags.take(4).forEach { tag ->
+                                        Surface(
+                                            shape = RoundedCornerShape(999.dp),
+                                            color = MaterialTheme.colorScheme.surfaceVariant
+                                        ) {
+                                            Text(
+                                                text = tag,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                    if (tags.size > 4) {
+                                        Text(
+                                            text = "+${tags.size - 4}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(top = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+
+                            val annotated = buildMentionAnnotatedText(body)
+                            ClickableText(
+                                text = annotated,
+                                style = MaterialTheme.typography.bodyMedium.copy(color = textColor),
+                                onClick = { offset ->
+                                    val hit = annotated
+                                        .getStringAnnotations(tag = "mention", start = offset, end = offset)
+                                        .firstOrNull()
+                                    if (hit != null) {
+                                    }
+                                }
                             )
                         }
                     }
