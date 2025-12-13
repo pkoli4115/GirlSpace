@@ -4,6 +4,7 @@ plugins {
     id 'kotlin-kapt'
     id 'com.google.dagger.hilt.android'
     id 'com.google.gms.google-services'
+    id 'com.google.firebase.crashlytics'
 }
 
 android {
@@ -14,18 +15,48 @@ android {
         applicationId "com.girlspace.app"
         minSdk 24
         targetSdk 35
-        versionCode 20
-        versionName "20.1.1"
+        versionCode 23
+        versionName "23.1.1"
         vectorDrawables.useSupportLibrary = true
+    }
+// ✅ SIGNING CONFIGS (uses your gradle.properties)
+    signingConfigs {
+
+        debug {
+            storeFile file(DEBUG_STORE_FILE)
+            storePassword DEBUG_STORE_PASSWORD
+            keyAlias DEBUG_KEY_ALIAS
+            keyPassword DEBUG_KEY_PASSWORD
+        }
+
+        release {
+            storeFile file(RELEASE_STORE_FILE)
+            storePassword RELEASE_STORE_PASSWORD
+            keyAlias RELEASE_KEY_ALIAS
+            keyPassword RELEASE_KEY_PASSWORD
+        }
     }
 
     buildTypes {
-        debug { minifyEnabled false }
+
+        debug {
+            signingConfig signingConfigs.debug
+
+            firebaseCrashlytics {
+                mappingFileUploadEnabled false
+            }
+        }
+
         release {
+            signingConfig signingConfigs.release
+            debuggable false
+
             minifyEnabled true
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
+
     }
 
     compileOptions {
@@ -47,6 +78,9 @@ android {
     }
 
     packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
         resources {
             excludes += [
                     'META-INF/DEPENDENCIES',
@@ -81,9 +115,6 @@ dependencies {
 // ML Kit Image Labeling
     implementation "com.google.mlkit:image-labeling:17.0.7"
 
-// If you DON'T already have this (you probably do, for Firebase .await()):
-    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.7.3"
-
     /* ------------------------------
        Core AndroidX
     -------------------------------- */
@@ -112,7 +143,6 @@ dependencies {
        MLKit (Correct / Latest)
     -------------------------------- */
     implementation "com.google.mlkit:vision-common:17.3.0"
-    implementation "com.google.mlkit:image-labeling:17.0.7"
 
     /* ------------------------------
        Firebase
@@ -123,6 +153,8 @@ dependencies {
     implementation 'com.google.firebase:firebase-storage'
     implementation 'com.google.firebase:firebase-messaging'   // FCM
     implementation 'com.google.firebase:firebase-analytics'
+    implementation 'com.google.firebase:firebase-crashlytics'
+
 
 
     /* Google Login + Location */

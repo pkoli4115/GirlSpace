@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.feed
+import android.util.Log
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.core.animateFloatAsState
@@ -109,6 +110,12 @@ fun FeedScreen(
     val isInitialLoading by vm.isInitialLoading.collectAsState()
     val isPaging by vm.isPaging.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    LaunchedEffect(Unit) {
+        Log.e("FEED_RELEASE", "FeedScreen entered (LaunchedEffect)")
+    }
+    Log.e("FEED_RELEASE", "FeedScreen recomposed")
+    Log.e("FEED_RELEASE", "FeedScreen state: items=${feedItems.size}, loading=$isInitialLoading, error=$errorMessage")
+
     val premiumRequired by vm.premiumRequired.collectAsState()
     val maxImages by vm.currentMaxImages.collectAsState()
     val posts = vm.posts.collectAsState().value

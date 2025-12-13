@@ -1,5 +1,6 @@
 package com.girlspace.app.data.feed
-
+import androidx.annotation.Keep
+import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.Timestamp
 
 /**
@@ -9,6 +10,8 @@ import com.google.firebase.Timestamp
  *  - `imageUrls` can hold multiple images.
  *  - `videoUrls` is optional; use it for short clips / reels attached to the post.
  */
+@Keep
+@IgnoreExtraProperties
 data class Post(
     val postId: String = "",
     val uid: String = "",

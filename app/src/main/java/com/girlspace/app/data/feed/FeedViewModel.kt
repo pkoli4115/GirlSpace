@@ -72,8 +72,35 @@ class FeedViewModel : ViewModel() {
     val currentMaxImages: StateFlow<Int> = _currentMaxImages
 
     init {
+        Log.e("FEED_RELEASE", "FeedViewModel initialized – calling refresh()")
+        fun refresh() {
+            Log.e("FEED_RELEASE", "refresh() started")
+
+            viewModelScope.launch {
+                _isInitialLoading.value = true
+                _hasMore.value = true
+                engine.resetPagination()
+
+                try {
+                    val items = engine.loadInitialPage()
+                    Log.e("FEED_RELEASE", "refresh() success, items=${items.size}")
+                    applyNewFeedItems(items)
+
+                } catch (e: Exception) {
+                    Log.e("FEED_RELEASE", "refresh() failed", e)
+                    _errorMessage.value = e.localizedMessage ?: "Failed to load feed"
+                    _feedItems.value = emptyList()
+                    _posts.value = emptyList()
+
+                } finally {
+                    _isInitialLoading.value = false
+                }
+            }
+        }
+
         refresh()
     }
+
 
     // ------------------------------------------------------------------------
     // FEED LOADING

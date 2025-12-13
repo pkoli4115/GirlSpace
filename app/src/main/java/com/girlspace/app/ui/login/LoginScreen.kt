@@ -48,6 +48,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
 import java.util.concurrent.TimeUnit
 import androidx.compose.ui.res.painterResource
+
+
 data class LoginBackgroundSlide(
     @DrawableRes val imageRes: Int,
     val title: String,
