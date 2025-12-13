@@ -1,4 +1,13 @@
 package com.girlspace.app.ui.chat
+import android.annotation.SuppressLint
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.foundation.lazy.itemsIndexed
 import kotlinx.coroutines.tasks.await
@@ -85,9 +94,11 @@ data class ChatUserSummary(
  * - Auto-scrolling horizontal row of friends & suggestions
  * - Vertical list of chat threads
  */
+@SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatsScreen(
+
     onOpenThread: (ChatThread) -> Unit = {},
     vm: ChatViewModel = viewModel()
 ) {
@@ -98,6 +109,27 @@ fun ChatsScreen(
 
     val error by vm.errorMessage.collectAsState()
     val lastStartedThread by vm.lastStartedThread.collectAsState()
+    var isSelectionMode by rememberSaveable { mutableStateOf(false) }
+    var selectedThreadIds by rememberSaveable { mutableStateOf(emptySet<String>()) }
+    fun enterSelection(threadId: String) {
+        isSelectionMode = true
+        selectedThreadIds = setOf(threadId)
+    }
+
+    fun toggleSelection(threadId: String) {
+        selectedThreadIds =
+            if (selectedThreadIds.contains(threadId)) selectedThreadIds - threadId
+            else selectedThreadIds + threadId
+
+        if (selectedThreadIds.isEmpty()) {
+            isSelectionMode = false
+        }
+    }
+
+    fun clearSelection() {
+        isSelectionMode = false
+        selectedThreadIds = emptySet()
+    }
 
     val context = LocalContext.current
     val myId = FirebaseAuth.getInstance().currentUser?.uid ?: ""
@@ -106,7 +138,7 @@ fun ChatsScreen(
     var isSearchActive by rememberSaveable { mutableStateOf(false) }
     var searchText by rememberSaveable { mutableStateOf("") }
     val mutedIds by vm.mutedThreadIds.collectAsState()
-
+    var actionThread by remember { mutableStateOf<ChatThread?>(null) }
     LaunchedEffect(error) {
         if (!error.isNullOrBlank()) {
             Toast.makeText(context, error, Toast.LENGTH_SHORT).show()
@@ -119,6 +151,9 @@ fun ChatsScreen(
             onOpenThread(thread)
             vm.consumeLastStartedThread()
         }
+    }
+    BackHandler(enabled = isSelectionMode) {
+        clearSelection()
     }
 
     // Merge friends + suggestions into one row (Messenger-style)
@@ -204,54 +239,150 @@ fun ChatsScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "Chats",
-                            style = MaterialTheme.typography.titleLarge
-                        )
+ Scaffold(
+            // ✅ Optional: removes extra automatic insets if your UI has too much top space
+            // If this line errors, delete it.
+            topBar = {
+                if (!isSelectionMode) {
+                    // ✅ NORMAL TOP BAR (your current one, unchanged behavior)
+                    TopAppBar(
+                        // If this line errors, delete it.
+                        windowInsets = WindowInsets(0, 0, 0, 0),
 
-                        if (totalUnread > 0) {
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.primary),
-                                contentAlignment = Alignment.Center
-                            ) {
+                        title = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
-                                    text = if (totalUnread > 99) "99+" else totalUnread.toString(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White,
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    text = "Chats",
+                                    style = MaterialTheme.typography.titleLarge
+                                )
+
+                                if (totalUnread > 0) {
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(CircleShape)
+                                            .background(MaterialTheme.colorScheme.primary),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            text = if (totalUnread > 99) "99+" else totalUnread.toString(),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        },
+                        actions = {
+                            IconButton(onClick = { isSearchActive = !isSearchActive }) {
+                                Icon(
+                                    imageVector = Icons.Default.Search,
+                                    contentDescription = "Search",
+                                    tint = MaterialTheme.colorScheme.onSurface
                                 )
                             }
                         }
+                    )
+                } else {
+                    // ✅ WHATSAPP STYLE SELECTION BAR (NO dialog)
+                    val selectedThreads = remember(allThreads, selectedThreadIds) {
+                        allThreads.filter { selectedThreadIds.contains(it.id) }
                     }
-                },
-                actions = {
-                    IconButton(onClick = { isSearchActive = !isSearchActive }) {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search",
-                            tint = MaterialTheme.colorScheme.onSurface
-                        )
-                    }
-                }
-            )
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .padding(paddingValues)
-                .fillMaxSize()
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
 
-            // Search bar (shown only if active)
+                    val anyMuted = selectedThreads.any { mutedIds.contains(it.id) }
+                    val anyGroup = selectedThreads.any { it.isGroup() }
+                    val allOneToOne = selectedThreads.isNotEmpty() && selectedThreads.all { !it.isGroup() }
+
+                    TopAppBar(
+                        // If this line errors, delete it.
+                        windowInsets = WindowInsets(0, 0, 0, 0),
+
+                        navigationIcon = {
+                            IconButton(onClick = { clearSelection() }) {
+                                Icon(Icons.Filled.Close, contentDescription = "Cancel")
+                            }
+                        },
+                        title = {
+                            Text(
+                                text = selectedThreadIds.size.toString(),
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                        },
+                        actions = {
+                            // 🔕 Mute / Unmute
+                            IconButton(
+                                onClick = {
+                                    val newMuted = !anyMuted
+                                    selectedThreads.forEach { t ->
+                                        vm.setThreadMuted(t.id, newMuted)
+                                    }
+                                    clearSelection()
+                                }
+                            ) {
+                                Icon(
+                                    imageVector = if (anyMuted) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+                                    contentDescription = if (anyMuted) "Unmute" else "Mute"
+                                )
+                            }
+
+                            // 📌 Pin / Unpin (UI ready; wire later to Firestore if you want)
+                            IconButton(
+                                onClick = {
+                                    vm.toggleThreadsPinned(selectedThreadIds)
+                                    clearSelection()
+                                }
+                            ) {
+                                Icon(Icons.Filled.PushPin, contentDescription = "Pin/Unpin")
+                            }
+                            // 🗑 Delete (for me) — UI action (wire later to actual delete logic)
+                            IconButton(
+                                onClick = {
+                                    vm.deleteThreadsForMe(selectedThreadIds)
+                                    clearSelection()
+                                }
+                            ) {
+                                Icon(Icons.Filled.Delete, contentDescription = "Delete")
+                            }
+
+
+                            // 🚫 Block (1-1 only)
+                            if (allOneToOne) {
+                                IconButton(
+                                    onClick = {
+                                        // TODO: vm.blockUserFromThread(selectedThreads.first())
+                                        clearSelection()
+                                    }
+                                ) {
+                                    Icon(Icons.Filled.Block, contentDescription = "Block")
+                                }
+                            }
+
+                            // 🚪 Leave group (only if any selected is group)
+                            if (anyGroup) {
+                                IconButton(
+                                    onClick = {
+                                        // TODO: vm.leaveGroupThreads(selectedThreadIds)
+                                        clearSelection()
+                                    }
+                                ) {
+                                    Text("Exit")
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+        ) {paddingValues ->
+     Column(
+         modifier = Modifier
+             .fillMaxSize()
+             .padding(paddingValues)
+             .padding(horizontal = 12.dp)
+     ) {
+
+
+     // Search bar (shown only if active)
             if (isSearchActive) {
                 OutlinedTextField(
                     value = searchText,
@@ -353,21 +484,34 @@ fun ChatsScreen(
                     val otherId = thread.otherUserId(myId)
                         val isOnline = presenceMap[otherId] ?: false
 
+                        val isSelected = selectedThreadIds.contains(thread.id)
                         ChatThreadRow(
                             thread = thread,
                             myId = myId,
                             isOnline = isOnline,
                             nameCache = nameCache,
                             isMuted = mutedIds.contains(thread.id),
+                            isSelected = isSelected,
                             onToggleMute = { mute ->
+                                // keep existing mute logic intact
                                 vm.setThreadMuted(thread.id, mute)
                             },
                             onClick = {
-                                vm.selectThread(thread)
-                                onOpenThread(thread)
+                                if (isSelectionMode) {
+                                    toggleSelection(thread.id)
+                                } else {
+                                    vm.selectThread(thread)
+                                    onOpenThread(thread)
+                                }
+                            },
+                            onLongPress = {
+                                if (!isSelectionMode) {
+                                    enterSelection(thread.id)
+                                } else {
+                                    toggleSelection(thread.id)
+                                }
                             }
                         )
-
                     }
                 }
             }
@@ -449,9 +593,11 @@ private fun ChatThreadRow(
     myId: String,
     isOnline: Boolean,
     isMuted: Boolean,
+    isSelected: Boolean, // ✅ NEW
     onToggleMute: (Boolean) -> Unit,
     nameCache: MutableMap<String, String>,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongPress: () -> Unit
 )
 {
     val firestore = remember { FirebaseFirestore.getInstance() }
@@ -494,7 +640,6 @@ private fun ChatThreadRow(
                         .get()
                         .await()
 
-
                     val displayName =
                         userDoc.getString("displayName")
                             ?: userDoc.getString("name")
@@ -505,11 +650,11 @@ private fun ChatThreadRow(
                         nameCache[otherUid] = displayName
                         title = displayName
                     }
-                } catch (_: Exception) { }
+                } catch (_: Exception) {
+                }
 
                 return@LaunchedEffect
             }
-
 
             val names = mutableListOf<String>()
             val avatars = mutableListOf<String>()
@@ -580,11 +725,16 @@ private fun ChatThreadRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
+            .background(
+                if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                else Color.Transparent
+            )
             .combinedClickable(
                 onClick = onClick,
-                onLongClick = { onToggleMute(!isMuted) }
+                onLongClick = { onLongPress() }
             )
             .padding(horizontal = 8.dp, vertical = 6.dp),
+
         verticalAlignment = Alignment.CenterVertically
     ) {
         // Avatar: 1-1 uses old avatar+dot, group uses stacked avatars
@@ -662,7 +812,6 @@ private fun ChatThreadRow(
                     modifier = Modifier.padding(top = 2.dp)
                 )
             }
-
             if (thread.unreadCount > 0) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Box(

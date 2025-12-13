@@ -83,10 +83,19 @@ class ChatRepository(
                     return@addSnapshotListener
                 }
 
-                val list = snap?.documents?.map { doc ->
+                val threadsWithPin = snap?.documents?.mapNotNull { doc ->
+
+                    // 🚫 Skip deleted threads for this user
+                    val deletedFor =
+                        (doc.get("deletedFor") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
+                    if (deletedFor.contains(uid)) return@mapNotNull null
+
                     val lastTsMillis =
-                        // support both lastTimestamp + lastTimestampMillis if you ever add it
                         (doc.get("lastTimestamp") ?: doc.get("lastTimestampMillis")).toMillisSafe()
+
+                    // 📌 Read per-user pinned time
+                    val pinnedAtMillis =
+                        (doc.get("pinnedAt_$uid") ?: 0L).toMillisSafe()
 
                     ChatThread(
                         id = doc.id,
@@ -97,11 +106,20 @@ class ChatRepository(
                         lastMessage = doc.getString("lastMessage") ?: "",
                         lastTimestamp = lastTsMillis,
                         unreadCount = (doc.get("unread_$uid") as? Long)?.toInt() ?: 0
-                    )
+                    ) to pinnedAtMillis
+
                 } ?: emptyList()
 
-                // Newest chats first
-                onUpdate(list.sortedByDescending { it.lastTimestamp })
+// ✅ Sort: pinned first → newest pinned → newest normal
+                val sorted = threadsWithPin
+                    .sortedWith(
+                        compareByDescending<Pair<ChatThread, Long>> { it.second > 0L }
+                            .thenByDescending { it.second }
+                            .thenByDescending { it.first.lastTimestamp }
+                    )
+                    .map { it.first }
+
+                onUpdate(sorted)
             }
     }
 
@@ -119,6 +137,51 @@ class ChatRepository(
                 .await()
         } catch (e: Exception) {
             Log.w("ChatRepository", "markThreadRead failed", e)
+        }
+    }
+
+    /**
+     * 📌 Pin/unpin for current user only.
+     * Stores a per-user field: pinnedAt_<uid> = millis (or 0).
+     */
+    suspend fun setThreadPinned(threadId: String, pinned: Boolean) {
+        val uid = currentUid()
+        if (uid.isBlank()) return
+
+        val field = "pinnedAt_$uid"
+        val value = if (pinned) System.currentTimeMillis() else 0L
+
+        try {
+            threadsRef.document(threadId)
+                .update(field, value)
+                .await()
+        } catch (e: Exception) {
+            Log.w("ChatRepository", "setThreadPinned failed", e)
+        }
+    }
+
+    /**
+     * 🗑 Delete thread for current user only.
+     * Adds uid to chatThreads/{threadId}.deletedFor array
+     */
+    suspend fun deleteThreadForMe(threadId: String) {
+        val uid = currentUid()
+        if (uid.isBlank()) return
+
+        try {
+            firestore.runTransaction { tx ->
+                val ref = threadsRef.document(threadId)
+                val snap = tx.get(ref)
+                if (!snap.exists()) return@runTransaction
+
+                val current = (snap.get("deletedFor") as? List<String>) ?: emptyList()
+                if (current.contains(uid)) return@runTransaction
+
+                tx.update(ref, "deletedFor", current + uid)
+                tx.update(ref, "unread_$uid", 0L) // optional: clear badge
+            }.await()
+        } catch (e: Exception) {
+            Log.w("ChatRepository", "deleteThreadForMe failed", e)
         }
     }
 

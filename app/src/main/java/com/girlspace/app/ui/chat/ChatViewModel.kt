@@ -62,6 +62,46 @@ class ChatViewModel : ViewModel() {
         auth = auth,
         firestore = firestore
     )
+    // -------------------------
+// THREAD ACTIONS (Chats list)
+// -------------------------
+
+    fun setThreadsPinned(threadIds: Set<String>, pinned: Boolean) {
+        if (threadIds.isEmpty()) return
+
+        // Optimistic UI: keep list stable and reorder will come from Firestore listener
+        viewModelScope.launch {
+            threadIds.forEach { id ->
+                try {
+                    repo.setThreadPinned(id, pinned)
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "setThreadsPinned failed for $id", e)
+                    _errorMessage.value = e.message ?: "Pin action failed"
+                }
+            }
+        }
+    }
+
+    fun deleteThreadsForMe(threadIds: Set<String>) {
+        if (threadIds.isEmpty()) return
+
+        // Optimistic UI: remove immediately so user sees it instantly
+        val current = _threads.value
+        _threads.value = current.filterNot { threadIds.contains(it.id) }
+        applyThreadFilter()
+
+        viewModelScope.launch {
+            threadIds.forEach { id ->
+                try {
+                    repo.deleteThreadForMe(id)
+                } catch (e: Exception) {
+                    Log.w("ChatViewModel", "deleteThreadsForMe failed for $id", e)
+                    _errorMessage.value = e.message ?: "Delete failed"
+                }
+            }
+        }
+    }
+
     private fun Any?.toMillisSafe(): Long {
         return when (this) {
             is Long -> this
@@ -288,6 +328,35 @@ class ChatViewModel : ViewModel() {
                 _mutedThreadIds.value = ids
             }
     }
+    fun toggleThreadsPinned(threadIds: Set<String>) {
+        val uid = auth.currentUser?.uid ?: return
+        if (threadIds.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                // If ANY selected is pinned -> unpin all. Else pin all.
+                var anyPinned = false
+
+                for (id in threadIds) {
+                    val snap = firestore.collection("chatThreads").document(id).get().await()
+                    val v = snap.get("pinnedAt_$uid")
+                    val pinnedAt = v.toMillisSafe()   // ✅ you already have toMillisSafe() in VM
+                    if (pinnedAt > 0L) {
+                        anyPinned = true
+                        break
+                    }
+                }
+
+                val willPin = !anyPinned
+                threadIds.forEach { id ->
+                    repo.setThreadPinned(id, willPin)
+                }
+            } catch (e: Exception) {
+                Log.w("ChatViewModel", "toggleThreadsPinned failed", e)
+                _errorMessage.value = "Pin failed. Try again."
+            }
+        }
+    }
 
     fun setThreadMuted(threadId: String, muted: Boolean) {
         val uid = auth.currentUser?.uid ?: return
@@ -312,6 +381,18 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+    fun setThreadPinned(threadId: String, pinned: Boolean) {
+        viewModelScope.launch {
+            repo.setThreadPinned(threadId, pinned)
+        }
+    }
+
+    fun deleteThreadForMe(threadId: String) {
+        viewModelScope.launch {
+            repo.deleteThreadForMe(threadId)
+        }
+    }
+
     private fun markThreadReadEverywhere(threadId: String) {
         val uid = currentUserId ?: return
 
