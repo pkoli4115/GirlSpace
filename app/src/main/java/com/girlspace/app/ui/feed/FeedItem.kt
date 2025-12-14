@@ -1,5 +1,5 @@
 package com.girlspace.app.ui.feed
-
+import com.google.android.gms.ads.nativead.NativeAd
 import com.girlspace.app.data.feed.Post
 import java.util.UUID
 
@@ -38,14 +38,25 @@ sealed class FeedItem {
     }
 
     /** Ad item (image + click action) */
+
     data class AdItem(
+        // ✅ Old fields kept for backward compatibility (your existing fake ads)
         val adId: String,
-        val imageUrl: String,
-        val clickUrl: String?,
-        val weight: Double
+        val clickUrl: String = "",
+        val adPosition: Int,
+        val imageUrl: String = "",
+        val weight: Int = 1,
+
+        // ✅ New field for REAL AdMob native ads
+        val nativeAd: NativeAd? = null,
+
+        // Optional: helps keying/analytics/positioning
+        val position: Int = -1
     ) : FeedItem() {
-        override val key: String = "ad_$adId"
+        override val key: String =
+            if (adId.isNotBlank()) "ad_$adId" else "ad_pos_$position"
     }
+
 
     // -------------------------------------------------------------
     // DECORATIVE / UX ELEMENTS
@@ -65,6 +76,8 @@ sealed class FeedItem {
     ) : FeedItem() {
         override val key: String = "evergreen_${title.hashCode()}"
     }
+    /** ✅ REAL Native Ad item */
+
 
     /** Loading shimmer block used during pagination */
     data class LoadingBlock(

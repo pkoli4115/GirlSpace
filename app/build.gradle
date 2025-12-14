@@ -2,6 +2,7 @@ plugins {
     id 'com.android.application'
     id 'org.jetbrains.kotlin.android'
     id 'kotlin-kapt'
+    id 'org.jetbrains.kotlin.plugin.compose'
     id 'com.google.dagger.hilt.android'
     id 'com.google.gms.google-services'
     id 'com.google.firebase.crashlytics'
@@ -66,18 +67,13 @@ android {
 
     kotlinOptions {
         jvmTarget = '17'
-        freeCompilerArgs += "-Xskip-metadata-version-check"
     }
 
     buildFeatures {
         compose true
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion '1.5.14'
-    }
-
-    packagingOptions {
+  packagingOptions {
         jniLibs {
             useLegacyPackaging = false
         }
@@ -100,7 +96,7 @@ dependencies {
     /* ------------------------------
        Jetpack Compose BOM
     -------------------------------- */
-    def composeBom = platform('androidx.compose:compose-bom:2024.08.00')
+    def composeBom = platform('androidx.compose:compose-bom:2024.02.02')
     implementation composeBom
     androidTestImplementation composeBom
 
@@ -138,6 +134,11 @@ dependencies {
        Coil (Images & Avatar)
     -------------------------------- */
     implementation 'io.coil-kt:coil-compose:2.7.0'
+
+    /* ------------------------------
+       ADS
+    -------------------------------- */
+    implementation "com.google.android.gms:play-services-ads:23.2.0"
 
     /* ------------------------------
        MLKit (Correct / Latest)

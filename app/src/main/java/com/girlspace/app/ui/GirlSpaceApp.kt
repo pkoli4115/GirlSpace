@@ -1,43 +1,36 @@
 package com.girlspace.app.ui
-import com.girlspace.app.ui.notifications.NotificationsScreen
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.collectAsState
-import com.girlspace.app.utils.DeepLinkStore
-import androidx.navigation.NavType
-import com.girlspace.app.ui.friends.FriendsScreen
-import com.girlspace.app.ui.profile.UserMediaScreen
-import com.girlspace.app.ui.profile.UserPostsScreen
-import androidx.navigation.compose.composable
-import androidx.navigation.navArgument
-import com.girlspace.app.ui.chat.ChatViewModel
-import com.girlspace.app.ui.feed.PostDetailScreen
-import com.girlspace.app.ui.feed.SavedPostsScreen
-import com.girlspace.app.ui.home.HomeRoot
-import com.girlspace.app.ui.login.LoginScreen
-import com.girlspace.app.ui.onboarding.MoodOnboardingScreen
-import com.girlspace.app.ui.profile.DeleteAccountScreen
-import com.girlspace.app.ui.profile.ProfileScreen
-import androidx.compose.runtime.LaunchedEffect
+
+import android.net.Uri
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import com.girlspace.app.ui.billing.PremiumScreen
 import com.girlspace.app.ui.chat.ChatScreenV2
+import com.girlspace.app.ui.chat.ChatViewModel
+import com.girlspace.app.ui.feed.PostDetailScreen
+import com.girlspace.app.ui.feed.SavedPostsScreen
+import com.girlspace.app.ui.friends.FriendsScreen
 import com.girlspace.app.ui.groups.GroupChatScreen
 import com.girlspace.app.ui.home.HomeRoot
 import com.girlspace.app.ui.login.LoginScreen
+import com.girlspace.app.ui.notifications.NotificationsScreen
 import com.girlspace.app.ui.onboarding.MoodOnboardingScreen
 import com.girlspace.app.ui.onboarding.OnboardingViewModel
 import com.girlspace.app.ui.profile.DeleteAccountScreen
 import com.girlspace.app.ui.profile.ProfileScreen
+import com.girlspace.app.ui.profile.UserMediaScreen
+import com.girlspace.app.ui.profile.UserPostsScreen
 import com.girlspace.app.ui.splash.SplashScreen
 import com.girlspace.app.ui.splash.SplashViewModel
 import com.girlspace.app.ui.theme.VibeTheme
+import com.girlspace.app.utils.DeepLinkStore
 
 @Composable
 fun GirlSpaceApp() {
@@ -50,6 +43,7 @@ fun GirlSpaceApp() {
         val navController = rememberNavController()
         val openThreadId by DeepLinkStore.openChatThreadId.collectAsState()
 
+        // Deep link handling
         LaunchedEffect(openThreadId) {
             val tid = openThreadId
             if (!tid.isNullOrBlank()) {
@@ -107,8 +101,6 @@ fun GirlSpaceApp() {
                 MoodOnboardingScreen(
                     viewModel = vm,
                     onNext = {
-                        // Screen itself already calls saveFirstLaunchDone(),
-                        // but calling again is harmless.
                         vm.saveFirstLaunchDone()
                         navController.navigate("home_root") {
                             popUpTo("login") { inclusive = true }
@@ -119,8 +111,7 @@ fun GirlSpaceApp() {
             }
 
             /* ---------------------------------------------------
-                4) HOME ROOT (Feed / Reels / Chats / Friends /
-                   Communities / Menu)
+                4) HOME ROOT
             ---------------------------------------------------- */
             composable(route = "home_root") {
                 HomeRoot(
@@ -138,12 +129,14 @@ fun GirlSpaceApp() {
                         navController.navigate("profile")
                     },
                     onOpenChatFromFriends = { friendUid ->
-                        // NEW: navigate to a chat route by user id
                         navController.navigate("chat_with_user/$friendUid")
                     }
                 )
             }
 
+            /* ---------------------------------------------------
+                Notifications
+            ---------------------------------------------------- */
             composable("notifications") {
                 NotificationsScreen(
                     onBack = { navController.popBackStack() },
@@ -157,38 +150,30 @@ fun GirlSpaceApp() {
             }
 
             /* ---------------------------------------------------
-                5) PREMIUM UPGRADE SCREEN
+                5) PREMIUM
             ---------------------------------------------------- */
             composable(route = "premium") {
                 PremiumScreen(navController = navController)
             }
 
             /* ---------------------------------------------------
-                6) PROFILE SCREEN
+                6) PROFILE
             ---------------------------------------------------- */
-            // Self profile (existing)
+            // Self profile
             composable("profile") {
                 ProfileScreen(
                     navController = navController,
-                    onLogout = { /* same as before */ },
-                    onUpgrade = { /* same as before */ }
-                )
-            }
-            composable(
-                route = "user_posts/{userId}",
-                arguments = listOf(
-                    navArgument("userId") { type = NavType.StringType }
-                )
-            ) { backStackEntry ->
-                val userId = backStackEntry.arguments?.getString("userId") ?: return@composable
-
-                UserPostsScreen(
-                    userId = userId,
-                    navController = navController
+                    onLogout = {
+                        navController.navigate("login") {
+                            popUpTo("home_root") { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                    onUpgrade = { navController.navigate("premium") }
                 )
             }
 
-// Other-user profile (NEW)
+            // Other-user profile
             composable(
                 route = "profile/{userId}",
                 arguments = listOf(
@@ -199,11 +184,30 @@ fun GirlSpaceApp() {
 
                 ProfileScreen(
                     navController = navController,
-                    onLogout = { /* same as before */ },
-                    onUpgrade = { /* same as before */ },
+                    onLogout = {
+                        navController.navigate("login") {
+                            popUpTo("home_root") { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                    onUpgrade = { navController.navigate("premium") },
                     profileUserId = userId
                 )
             }
+
+            composable(
+                route = "user_posts/{userId}",
+                arguments = listOf(
+                    navArgument("userId") { type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val userId = backStackEntry.arguments?.getString("userId") ?: return@composable
+                UserPostsScreen(
+                    userId = userId,
+                    navController = navController
+                )
+            }
+
             // User-specific media (posts / reels / photos)
             composable(
                 route = "user_media/{userId}/{type}",
@@ -222,7 +226,7 @@ fun GirlSpaceApp() {
                 )
             }
 
-// Friends / Followers / Following entry point from profile metrics row
+            // Friends / Followers / Following
             composable(
                 route = "friends?userId={userId}&tab={tab}",
                 arguments = listOf(
@@ -254,13 +258,13 @@ fun GirlSpaceApp() {
             }
 
             /* ---------------------------------------------------
-                6b) SAVED POSTS SCREEN
+                6b) SAVED POSTS
             ---------------------------------------------------- */
             composable(route = "savedPosts") {
                 SavedPostsScreen(navController = navController)
             }
 
-            // Single post detail (opened from profile → posts list)
+            // Single post detail
             composable(
                 route = "postDetail/{postId}",
                 arguments = listOf(
@@ -268,23 +272,19 @@ fun GirlSpaceApp() {
                 )
             ) { backStackEntry ->
                 val postId = backStackEntry.arguments?.getString("postId") ?: return@composable
-
                 PostDetailScreen(
                     postId = postId,
                     navController = navController
                 )
             }
 
-
-
             /* ---------------------------------------------------
-                7) DELETE ACCOUNT SCREEN
+                7) DELETE ACCOUNT
             ---------------------------------------------------- */
             composable(route = "deleteAccount") {
                 DeleteAccountScreen(
                     onBack = { navController.popBackStack() },
                     onAccountDeleted = {
-                        // After delete, send user to login and clear back stack
                         navController.navigate("login") {
                             popUpTo("splash") { inclusive = true }
                             launchSingleTop = true
@@ -294,14 +294,18 @@ fun GirlSpaceApp() {
             }
 
             /* ---------------------------------------------------
-                8) GROUP CHAT SCREEN
+                8) GROUP CHAT
             ---------------------------------------------------- */
             composable(
-                route = "group_chat/{groupId}/{groupName}"
+                route = "group_chat/{groupId}/{groupName}",
+                arguments = listOf(
+                    navArgument("groupId") { type = NavType.StringType },
+                    navArgument("groupName") { type = NavType.StringType }
+                )
             ) { backStackEntry ->
                 val groupId = backStackEntry.arguments?.getString("groupId") ?: return@composable
-                val groupName =
-                    backStackEntry.arguments?.getString("groupName") ?: "Group"
+                val rawName = backStackEntry.arguments?.getString("groupName") ?: "Group"
+                val groupName = Uri.decode(rawName)
 
                 GroupChatScreen(
                     groupId = groupId,
@@ -309,23 +313,24 @@ fun GirlSpaceApp() {
                     onBack = { navController.popBackStack() }
                 )
             }
+
             /* ---------------------------------------------------
-               9) 1-1 CHAT BY USER ID (Friends → Message)
+                9) 1-1 CHAT BY USER ID
             ---------------------------------------------------- */
             composable(
-                route = "chat_with_user/{otherUid}"
+                route = "chat_with_user/{otherUid}",
+                arguments = listOf(
+                    navArgument("otherUid") { type = NavType.StringType }
+                )
             ) { backStackEntry ->
                 val otherUid = backStackEntry.arguments?.getString("otherUid") ?: return@composable
 
-                // Use Hilt to get the existing ChatViewModel
                 val chatVm: ChatViewModel = hiltViewModel()
 
-                // Ensure or create a thread for this friend
                 LaunchedEffect(otherUid) {
                     chatVm.startChatWithUser(otherUid)
                 }
 
-                // Observe when the thread is ready
                 val selectedThread by chatVm.selectedThread.collectAsState()
                 val thread = selectedThread
 
@@ -338,24 +343,22 @@ fun GirlSpaceApp() {
                 }
             }
 
-            /* -----------------------------
-  * 9) 1-1 CHAT SCREEN (NEW)
-  * ----------------------------- */
+            /* ---------------------------------------------------
+                10) 1-1 CHAT BY THREAD ID
+            ---------------------------------------------------- */
             composable(
-                route = "chat/{threadId}"
+                route = "chat/{threadId}",
+                arguments = listOf(
+                    navArgument("threadId") { type = NavType.StringType }
+                )
             ) { backStackEntry ->
-                val threadId = backStackEntry.arguments?.getString("threadId")
-                    ?: return@composable
+                val threadId = backStackEntry.arguments?.getString("threadId") ?: return@composable
 
                 ChatScreenV2(
                     threadId = threadId,
                     onBack = { navController.popBackStack() }
-                    // if your ChatScreenV2 needs vm or other params, pass them here as well
-                    // vm = chatVm
                 )
             }
-
-
         }
     }
 }

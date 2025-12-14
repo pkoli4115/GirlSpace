@@ -228,32 +228,12 @@ class FeedEngine(
         return withAds
     }
 
-    // ---------------------------------------------------------
-    // AD INSERTION LOGIC
-    // ---------------------------------------------------------
+// ✅ Ads are injected in FeedViewModel (real NativeAds).
+// FeedEngine should NOT inject fake ads, otherwise it creates duplicates.
     private fun injectAds(items: List<FeedItem>): MutableList<FeedItem> {
-        if (!enableAds) return items.toMutableList()
-
-        val output = mutableListOf<FeedItem>()
-        var countSinceLastAd = 0
-
-        items.forEach { item ->
-            output += item
-            countSinceLastAd++
-
-            if (countSinceLastAd >= adInterval) {
-                countSinceLastAd = 0
-                output += FeedItem.AdItem(
-                    adId = "ad_${System.nanoTime()}",
-                    imageUrl = "https://picsum.photos/seed/ad${System.nanoTime()}/600/400",
-                    clickUrl = null,
-                    weight = 1.0
-                )
-            }
-        }
-
-        return output
+        return items.toMutableList()
     }
+
 
     // ---------------------------------------------------------
     // RESET PAGINATION (called on refresh / initial load)

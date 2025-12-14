@@ -1,18 +1,14 @@
 package com.girlspace.app.ui.feed
-import android.util.Log
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.Modifier
-import androidx.compose.material3.CardDefaults
+
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -37,6 +33,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.ChatBubbleOutline
@@ -46,6 +43,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Divider
 import androidx.compose.material3.DropdownMenu
@@ -70,16 +68,18 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
 import com.girlspace.app.core.plan.PlanLimitsRepository
 import com.girlspace.app.data.feed.Comment
@@ -94,8 +94,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
-import androidx.navigation.NavHostController
-import androidx.hilt.navigation.compose.hiltViewModel
 
 @Composable
 fun FeedScreen(
@@ -110,15 +108,20 @@ fun FeedScreen(
     val isInitialLoading by vm.isInitialLoading.collectAsState()
     val isPaging by vm.isPaging.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+
     LaunchedEffect(Unit) {
         Log.e("FEED_RELEASE", "FeedScreen entered (LaunchedEffect)")
     }
     Log.e("FEED_RELEASE", "FeedScreen recomposed")
-    Log.e("FEED_RELEASE", "FeedScreen state: items=${feedItems.size}, loading=$isInitialLoading, error=$errorMessage")
+    Log.e(
+        "FEED_RELEASE",
+        "FeedScreen state: items=${feedItems.size}, loading=$isInitialLoading, error=$errorMessage"
+    )
 
     val premiumRequired by vm.premiumRequired.collectAsState()
     val maxImages by vm.currentMaxImages.collectAsState()
     val posts = vm.posts.collectAsState().value
+
     val feedVibe by styleVm.currentVibe.collectAsState()
     val quickVibes = styleVm.quickVibes
 
@@ -129,6 +132,11 @@ fun FeedScreen(
     val currentUser = auth.currentUser
     val firestore = remember { FirebaseFirestore.getInstance() }
     val context = LocalContext.current
+
+    // ✅ Ad integration change: preload native ads on feed entry (safe)
+    LaunchedEffect(Unit) {
+        vm.ensureAdsLoaded(context)
+    }
 
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -155,8 +163,7 @@ fun FeedScreen(
         onDispose { registration?.remove() }
     }
 
-    // Following set for this user
-// Following set for this user – from users/{uid}.following array
+    // Following set for this user – from users/{uid}.following array
     var followingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     DisposableEffect(currentUser?.uid) {
@@ -239,7 +246,6 @@ fun FeedScreen(
             .collect { index ->
                 showScrollToTop = index > 6
                 if (index == 0) {
-                    // User back at top: accept latest as baseline
                     latestTopKey = feedItems.firstOrNull()?.key
                     showNewPostsBadge = false
                     newPostsCount = 0
@@ -307,7 +313,17 @@ fun FeedScreen(
 
                     itemsIndexed(
                         items = feedItems,
-                        key = { _, item -> item.key }
+                        key = { index, item ->
+                            when (item) {
+                                is FeedItem.TopPicks -> "top_picks_$index"
+                                is FeedItem.EvergreenCard -> "evergreen_${item.key}_$index"
+                                is FeedItem.PostItem -> "post_${item.post.postId}"
+                                is FeedItem.ReelItem -> "reel_${item.key}_$index"
+                                is FeedItem.AdItem -> "ad_${item.adId}"     // ✅ THIS IS THE IMPORTANT PART
+                                is FeedItem.LoadingBlock -> "loading_$index"
+                                is FeedItem.ErrorBlock -> "error_${item.message}_$index"
+                            }
+                        }
                     ) { _, item ->
                         when (item) {
                             is FeedItem.TopPicks -> {
@@ -344,7 +360,6 @@ fun FeedScreen(
                                 PostCard(
                                     post = post,
                                     onAuthorClick = { authorId ->
-                                        // Open that user’s profile
                                         navController.navigate("profile/$authorId")
                                     },
                                     currentUserId = currentUser?.uid,
@@ -358,28 +373,16 @@ fun FeedScreen(
                                         val currentlyFollowing = followingIds.contains(authorUid)
 
                                         if (currentlyFollowing) {
-                                            // Unfollow: remove from following array
                                             userRef.update("following", FieldValue.arrayRemove(authorUid))
                                                 .addOnFailureListener {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Failed to unfollow",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
+                                                    Toast.makeText(context, "Failed to unfollow", Toast.LENGTH_SHORT).show()
                                                 }
                                         } else {
-                                            // Follow: add to following array
                                             userRef.update("following", FieldValue.arrayUnion(authorUid))
                                                 .addOnFailureListener {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Failed to follow",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
+                                                    Toast.makeText(context, "Failed to follow", Toast.LENGTH_SHORT).show()
                                                 }
                                         }
-                                        // No need to set local isFollowing – snapshotListener on the user doc
-                                        // will update followingIds and recomposition will refresh the label.
                                     },
                                     onLike = { vm.toggleLike(post) },
                                     onDelete = { vm.deletePost(post) { } },
@@ -393,11 +396,7 @@ fun FeedScreen(
                                         if (isSaved) {
                                             savedRef.delete()
                                                 .addOnFailureListener {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Failed to unsave",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
+                                                    Toast.makeText(context, "Failed to unsave", Toast.LENGTH_SHORT).show()
                                                 }
                                         } else {
                                             val previewImage = post.imageUrls.firstOrNull()
@@ -410,11 +409,7 @@ fun FeedScreen(
                                             )
                                             savedRef.set(data, SetOptions.merge())
                                                 .addOnFailureListener {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Failed to save post",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
+                                                    Toast.makeText(context, "Failed to save post", Toast.LENGTH_SHORT).show()
                                                 }
                                         }
                                     },
@@ -425,7 +420,6 @@ fun FeedScreen(
                                     feedVibe = feedVibe
                                 )
                             }
-
 
                             is FeedItem.ReelItem -> {
                                 ReelCard(item, feedVibe)
@@ -438,14 +432,13 @@ fun FeedScreen(
                             }
 
                             is FeedItem.AdItem -> {
-                                AdCard(item, feedVibe)
-                                Divider(
-                                    modifier = Modifier
-                                        .padding(horizontal = 12.dp)
-                                        .fillMaxWidth(),
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
-                                )
+                                if (item.nativeAd != null) {
+                                    NativeAdCard(nativeAd = item.nativeAd)
+                                } else {
+                                    AdCard(item, feedVibe) // fallback for your old fake ads (optional)
+                                }
                             }
+
 
                             is FeedItem.LoadingBlock -> {
                                 LoadingRow()
@@ -460,6 +453,7 @@ fun FeedScreen(
                     if (isPaging) {
                         item { LoadingRow() }
                     }
+
                 }
             }
         }
@@ -526,7 +520,6 @@ fun FeedScreen(
         }
 
         // 🔔 New posts badge
-        // 🔔 New posts badge
         if (showNewPostsBadge && newPostsCount > 0) {
             NewPostsBadge(
                 count = newPostsCount,
@@ -543,7 +536,6 @@ fun FeedScreen(
                 }
             )
         }
-
 
         // ⬆️ Scroll-to-top FAB
         if (showScrollToTop) {
@@ -570,7 +562,9 @@ fun FeedScreen(
 }
 
 /* ============================================================================
+
    TOP SECTION / VIBE TOGGLE / EMPTY STATE / EVERGREEN / ADS / REELS / LOADING
+
    ========================================================================== */
 
 @Composable
@@ -929,7 +923,9 @@ fun ErrorRow(message: String) {
 }
 
 /* ============================================================================
+
    POST CARD + CREATE POST
+
    ========================================================================== */
 
 @Composable
@@ -1010,9 +1006,7 @@ fun PostCard(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
                         .weight(1f)
-                        .clickable {
-                            onAuthorClick(post.uid)
-                        }
+                        .clickable { onAuthorClick(post.uid) }
                 ) {
                     if (!post.authorPhoto.isNullOrBlank()) {
                         AsyncImage(
@@ -1025,8 +1019,7 @@ fun PostCard(
                         )
                     } else {
                         Surface(
-                            modifier = Modifier
-                                .size(40.dp),
+                            modifier = Modifier.size(40.dp),
                             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
                             shape = CircleShape
                         ) {
@@ -1133,9 +1126,7 @@ fun PostCard(
                             modifier = Modifier
                                 .height(220.dp)
                                 .fillParentMaxWidth(0.8f)
-                                .clickable {
-                                    onOpenMedia(post.imageUrls, index)
-                                },
+                                .clickable { onOpenMedia(post.imageUrls, index) },
                             shape = RoundedCornerShape(16.dp),
                             elevation = CardDefaults.cardElevation(2.dp)
                         ) {
@@ -1264,7 +1255,6 @@ fun PostCard(
             }
 
             if (showCommentBox) {
-
                 if (comments.isNotEmpty()) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Column(
@@ -1288,8 +1278,7 @@ fun PostCard(
                                 ) {
                                     Box(contentAlignment = Alignment.Center) {
                                         Text(
-                                            text = (c.authorName?.firstOrNull()?.uppercase()
-                                                ?: "U"),
+                                            text = (c.authorName?.firstOrNull()?.uppercase() ?: "U"),
                                             style = MaterialTheme.typography.labelMedium
                                         )
                                     }
@@ -1440,17 +1429,13 @@ fun CreatePostScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(
-                    onClick = { imagePickerLauncher.launch("image/*") }
-                ) {
+                TextButton(onClick = { imagePickerLauncher.launch("image/*") }) {
                     Text("Add photos")
                 }
 
                 Spacer(modifier = Modifier.weight(1f))
 
-                TextButton(onClick = onClose) {
-                    Text("Cancel")
-                }
+                TextButton(onClick = onClose) { Text("Cancel") }
 
                 TextButton(
                     onClick = {

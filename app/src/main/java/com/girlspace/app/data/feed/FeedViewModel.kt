@@ -1,4 +1,8 @@
 package com.girlspace.app.ui.feed
+
+import com.girlspace.app.ads.AdConfig
+import com.girlspace.app.ads.NativeAdLoader
+import com.google.android.gms.ads.nativead.NativeAd
 import com.girlspace.app.moderation.ImageModerationResult
 import com.girlspace.app.moderation.ModerationManager
 import com.girlspace.app.moderation.ImageModerator
@@ -34,6 +38,14 @@ class FeedViewModel : ViewModel() {
     )
     private val engine = FeedEngine(firestore)
     private val moderationManager = ModerationManager()
+    // ------------------------------------------------------------------------
+// ADS (Native AdMob) state
+// ------------------------------------------------------------------------
+    private val loadedAds = mutableListOf<NativeAd>()
+    private val _adsReady = MutableStateFlow(false)
+    val adsReady: StateFlow<Boolean> = _adsReady
+
+    private var isAdLoading = false
 
     // Mixed feed items (posts + reels + ads + top picks + evergreen)
     private val _feedItems = MutableStateFlow<List<FeedItem>>(emptyList())
@@ -45,7 +57,6 @@ class FeedViewModel : ViewModel() {
 
     private val _isInitialLoading = MutableStateFlow(false)
     val isInitialLoading: StateFlow<Boolean> = _isInitialLoading
-
     private val _isPaging = MutableStateFlow(false)
     val isPaging: StateFlow<Boolean> = _isPaging
     private val auth: FirebaseAuth = FirebaseAuth.getInstance()
@@ -84,8 +95,7 @@ class FeedViewModel : ViewModel() {
                 try {
                     val items = engine.loadInitialPage()
                     Log.e("FEED_RELEASE", "refresh() success, items=${items.size}")
-                    applyNewFeedItems(items)
-
+                    applyNewFeedItems(injectAds(items))
                 } catch (e: Exception) {
                     Log.e("FEED_RELEASE", "refresh() failed", e)
                     _errorMessage.value = e.localizedMessage ?: "Failed to load feed"
@@ -137,7 +147,7 @@ class FeedViewModel : ViewModel() {
                 } else {
                     val combined = _feedItems.value + next
                     val deduped = dedupeByKey(combined)
-                    applyNewFeedItems(deduped)
+                    applyNewFeedItems(injectAds(deduped))
                 }
             } catch (e: Exception) {
                 Log.e("FeedViewModel", "loadNextPage: failed", e)
@@ -159,6 +169,86 @@ class FeedViewModel : ViewModel() {
             .filterIsInstance<FeedItem.PostItem>()
             .map { it.post }
     }
+// ------------------------------------------------------------------------
+// ADS (Native AdMob) - Load + Inject
+// ------------------------------------------------------------------------
+
+    /**
+     * Call once from UI (FeedScreen) to preload a few native ads.
+     * Safe: if ads fail, feed still works.
+     */
+    fun ensureAdsLoaded(context: Context) {
+        if (isAdLoading || loadedAds.size >= 3) return
+
+        isAdLoading = true
+
+        val loader = NativeAdLoader(
+            context = context.applicationContext,
+            adUnitId = "ca-app-pub-3940256099942544/2247696110" // ✅ TEST native ad unit
+        )
+
+        // Load 3 ads (enough for many scrolls)
+        var loadedCount = 0
+        repeat(3) {
+            loader.load(
+                onLoaded = { ad ->
+                    loadedAds.add(ad)
+                    loadedCount++
+                    if (loadedCount >= 1) {
+                        _adsReady.value = true
+                    }
+                    // stop loading flag once we've tried enough
+                    if (loadedAds.size >= 3) {
+                        isAdLoading = false
+                    }
+                },
+                onFailed = {
+                    // fail-open: never break feed
+                    // Once all attempts are done, drop flag
+                    loadedCount++
+                    if (loadedCount >= 3) {
+                        isAdLoading = false
+                    }
+                }
+            )
+        }
+    }
+
+    /**
+     * Inserts already-loaded ads into feed after every N posts.
+     * Safe: if no ads, returns original list.
+     */
+    private fun injectAds(items: List<FeedItem>): List<FeedItem> {
+        val clean = items.filterNot { it is FeedItem.AdItem } // ✅ prevents duplicates
+
+        val result = mutableListOf<FeedItem>()
+        var postCount = 0
+        var adIndex = 0
+
+        clean.forEach { item ->
+            result.add(item)
+
+            if (item is FeedItem.PostItem) {
+                postCount++
+                if (postCount % 5 == 0 && adIndex < loadedAds.size) {
+                    result.add(
+                        FeedItem.AdItem(
+                            adId = "ad_${java.util.UUID.randomUUID()}",
+                            adPosition = postCount,
+                            nativeAd = loadedAds[adIndex],
+                            clickUrl = "",     // only if required by your data class
+                            imageUrl = "",     // only if required by your data class
+                            weight = 1         // only if required by your data class
+                        )
+                    )
+                    adIndex++
+                }
+            }
+        }
+        return result
+    }
+
+
 
     // ------------------------------------------------------------------------
     // UI FLAGS
@@ -342,6 +432,40 @@ class FeedViewModel : ViewModel() {
                 _errorMessage.value = e.localizedMessage ?: "Unexpected error"
             }
         }
+    }
+    private fun injectAds(
+        context: Context,
+        items: List<FeedItem>
+    ): List<FeedItem> {
+        if (loadedAds.isEmpty()) return items
+
+        val result = mutableListOf<FeedItem>()
+        var postCount = 0
+        var adIndex = 0
+
+        items.forEach { item ->
+            result.add(item)
+
+            if (item is FeedItem.PostItem) {
+                postCount++
+
+                // 🔥 Every 5 posts → insert ad
+                if (postCount % 5 == 0 && adIndex < loadedAds.size) {
+                    result.add(
+                        FeedItem.AdItem(
+                            adId = java.util.UUID.randomUUID().toString(), // ✅ always unique
+                            adPosition = postCount,
+                            nativeAd = loadedAds[adIndex]
+                        )
+
+
+
+                    )
+                    adIndex++
+                }
+            }
+        }
+        return result
     }
 
     fun addComment(postId: String, text: String) {
