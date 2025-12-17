@@ -6,7 +6,8 @@ import com.google.firebase.firestore.DocumentId
 
 @Keep
 data class ReelComment(
-    @DocumentId val id: String = "",
+    @DocumentId
+    var id: String = "", // ✅ must be var for safest Firestore mapping
     val reelId: String = "",
     val authorId: String = "",
     val authorName: String = "",

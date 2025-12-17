@@ -1,14 +1,14 @@
 package com.girlspace.app.ui.reels
-
+import com.google.firebase.Timestamp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.girlspace.app.data.reels.Reel
 import com.girlspace.app.data.reels.ReelComment
 import com.girlspace.app.data.reels.ReelsRepository
-import com.google.firebase.Timestamp
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -17,7 +17,9 @@ class ReelsViewModel @Inject constructor(
     private val repo: ReelsRepository
 ) : ViewModel() {
 
-    // ---------------- Reels grid paging ----------------
+    // -------------------------
+    // Reels paging state
+    // -------------------------
     private val _reels = MutableStateFlow<List<Reel>>(emptyList())
     val reels: StateFlow<List<Reel>> = _reels
 
@@ -30,18 +32,48 @@ class ReelsViewModel @Inject constructor(
     private var cursorCreatedAt: Timestamp? = null
     private var cursorId: String? = null
 
-    fun loadInitial() {
-        if (_reels.value.isNotEmpty()) return
+    // -------------------------
+    // Optimistic UI: likes + views
+    // -------------------------
+    private val _likedByMe = MutableStateFlow<Set<String>>(emptySet())
+    val likedByMe: StateFlow<Set<String>> = _likedByMe
+
+    // Track views fired in this session (avoid spamming)
+    private val viewedThisSession = mutableSetOf<String>()
+
+    // -------------------------
+    // Comments sheet state
+    // -------------------------
+    private val _commentsForReelId = MutableStateFlow<String?>(null)
+    val commentsForReelId: StateFlow<String?> = _commentsForReelId
+
+    private val _comments = MutableStateFlow<List<ReelComment>>(emptyList())
+    val comments: StateFlow<List<ReelComment>> = _comments
+
+    private val _commentsLoading = MutableStateFlow(false)
+    val commentsLoading: StateFlow<Boolean> = _commentsLoading
+
+    private val _commentsCanLoadMore = MutableStateFlow(true)
+    val commentsCanLoadMore: StateFlow<Boolean> = _commentsCanLoadMore
+
+    private var commentsCursor: ReelsRepository.CommentsCursor? = null
+
+    fun logShare(reelId: String) {
+        viewModelScope.launch {
+            runCatching { repo.logShare(reelId) }
+        }
+    }
+
+    // -------------------------
+    // Public API
+    // -------------------------
+    fun refresh() = loadInitial(force = true)
+    fun loadInitial(force: Boolean = false) {
+        if (!force && _reels.value.isNotEmpty()) return
+        resetPaging()
         loadNext()
     }
 
-    fun refreshNow() {
-        cursorCreatedAt = null
-        cursorId = null
-        _canLoadMore.value = true
-        _reels.value = emptyList()
-        loadNext()
-    }
 
     fun loadNext() {
         if (_isLoading.value || !_canLoadMore.value) return
@@ -58,6 +90,11 @@ class ReelsViewModel @Inject constructor(
                 val merged = (_reels.value + page.items).distinctBy { it.id }
                 _reels.value = merged
 
+                // ✅ hydrate liked state so viewer/grid shows correct icon immediately
+                if (page.likedByMeIds.isNotEmpty()) {
+                    _likedByMe.update { it + page.likedByMeIds }
+                }
+
                 cursorCreatedAt = page.nextCursorCreatedAt
                 cursorId = page.nextCursorId
 
@@ -70,33 +107,80 @@ class ReelsViewModel @Inject constructor(
         }
     }
 
-    fun toggleLike(reel: Reel) {
+    /**
+     * Call this after uploadReel() returns reelId.
+     * Inserts new reel at top (if fetch succeeds) and also keeps paging stable.
+     */
+    fun onUploadCompleted(reelId: String) {
         viewModelScope.launch {
-            try {
-                repo.toggleLike(reel)
-                // Optional: you can refresh the grid item counts later via listener/pull
-            } catch (_: Throwable) {
+            val reel = repo.getReelById(reelId) ?: run {
+                refresh()
+                return@launch
+            }
+            _reels.update { list ->
+                listOf(reel) + list.filterNot { it.id == reelId }
+            }
+            // keep canLoadMore true (grid can continue to paginate)
+            _canLoadMore.value = true
+        }
+    }
+
+    /**
+     * Ensure a reel exists in the current list (deep link / open from outside grid).
+     * If missing, fetch and prepend.
+     */
+    fun ensureReelInList(reelId: String) {
+        if (_reels.value.any { it.id == reelId }) return
+
+        viewModelScope.launch {
+            val reel = repo.getReelById(reelId) ?: return@launch
+            _reels.update { list ->
+                listOf(reel) + list.filterNot { it.id == reelId }
             }
         }
     }
 
-    // ---------------- Comments bottom sheet ----------------
-    private val _commentsForReelId = MutableStateFlow<String?>(null)
-    val commentsForReelId: StateFlow<String?> = _commentsForReelId
+    fun isLiked(reelId: String): Boolean = _likedByMe.value.contains(reelId)
 
-    private val _comments = MutableStateFlow<List<ReelComment>>(emptyList())
-    val comments: StateFlow<List<ReelComment>> = _comments
+    fun toggleLike(reel: Reel) {
+        val reelId = reel.id
+        val wasLiked = isLiked(reelId)
 
-    private val _commentsLoading = MutableStateFlow(false)
-    val commentsLoading: StateFlow<Boolean> = _commentsLoading
+        // ✅ optimistic: update UI immediately
+        _likedByMe.update { set ->
+            if (wasLiked) set - reelId else set + reelId
+        }
+        updateReelMetric(reelId, "likes", delta = if (wasLiked) -1 else 1)
 
-    private val _commentsCanLoadMore = MutableStateFlow(true)
-    val commentsCanLoadMore: StateFlow<Boolean> = _commentsCanLoadMore
+        viewModelScope.launch {
+            try {
+                repo.toggleLike(reel)
+            } catch (_: Throwable) {
+                // ❌ rollback on failure
+                _likedByMe.update { set ->
+                    if (wasLiked) set + reelId else set - reelId
+                }
+                updateReelMetric(reelId, "likes", delta = if (wasLiked) +1 else -1)
+            }
+        }
+    }
 
-    private var commentsCursor: Timestamp? = null
+    /**
+     * Call when a reel becomes "active" in the Viewer (or autoplay).
+     * - optimistic local increment
+     * - Firestore increment (best effort)
+     */
+    fun onReelViewed(reelId: String) {
+        if (!viewedThisSession.add(reelId)) return
+
+        updateReelMetric(reelId, "views", delta = 1)
+
+        viewModelScope.launch {
+            runCatching { repo.incrementView(reelId) }
+        }
+    }
 
     fun openComments(reelId: String) {
-        // Open sheet + load first page
         _commentsForReelId.value = reelId
         _comments.value = emptyList()
         _commentsCanLoadMore.value = true
@@ -107,6 +191,7 @@ class ReelsViewModel @Inject constructor(
     fun closeComments() {
         _commentsForReelId.value = null
         _comments.value = emptyList()
+        _commentsLoading.value = false
         _commentsCanLoadMore.value = true
         commentsCursor = null
     }
@@ -124,10 +209,9 @@ class ReelsViewModel @Inject constructor(
                     cursor = commentsCursor
                 )
 
-                val merged = (_comments.value + page).distinctBy { it.id }
-                _comments.value = merged
-
+                _comments.update { old -> (old + page).distinctBy { it.id } }
                 commentsCursor = nextCursor
+
                 if (page.isEmpty() || nextCursor == null) {
                     _commentsCanLoadMore.value = false
                 }
@@ -138,21 +222,68 @@ class ReelsViewModel @Inject constructor(
     }
 
     fun addComment(reelId: String, text: String) {
-        val t = text.trim()
-        if (t.isBlank()) return
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return
 
         viewModelScope.launch {
             try {
-                repo.addComment(reelId, t)
-                // Refresh from top so the new comment appears (serverTimestamp)
-                if (_commentsForReelId.value == reelId) {
-                    _comments.value = emptyList()
-                    _commentsCanLoadMore.value = true
-                    commentsCursor = null
-                    loadMoreComments()
+                val newComment = repo.addComment(reelId, trimmed)
+                // ✅ insert immediately; no full refresh / no scroll jump
+                _comments.update { list ->
+                    listOf(newComment) + list.filterNot { it.id == newComment.id }
                 }
             } catch (_: Throwable) {
+                // ignore for now (add snackbar later)
             }
         }
     }
+
+    // -------------------------
+    // Helpers
+    // -------------------------
+    private fun resetPaging() {
+        _reels.value = emptyList()
+        _isLoading.value = false
+        _canLoadMore.value = true
+        cursorCreatedAt = null
+        cursorId = null
+    }
+
+    private fun updateReelMetric(reelId: String, key: String, delta: Int) {
+        _reels.update { list ->
+            list.map { r ->
+                if (r.id != reelId) r else {
+                    val current = r.metricLong(key)
+                    r.withMetric(key, (current + delta).coerceAtLeast(0).toLong())
+                }
+            }
+        }
+    }
+}
+
+/**
+ * These helpers keep you safe no matter how your Reel model stores metrics.
+ * - If metrics is a Map -> it works
+ * - If metrics is null -> works
+ */
+private fun Reel.metricLong(key: String): Long {
+    val m = this.metrics
+    return when (m) {
+        is Map<*, *> -> (m[key] as? Number)?.toLong() ?: 0L
+        else -> 0L
+    }
+}
+
+private fun Reel.withMetric(key: String, value: Long): Reel {
+    val m = this.metrics
+    val newMap: Map<String, Any> = when (m) {
+        is Map<*, *> -> {
+            val base = m.entries.associate { it.key.toString() to (it.value as Any) }.toMutableMap()
+            base[key] = value
+            base
+        }
+        else -> mapOf(key to value)
+    }
+
+    return this.copy(metrics = newMap)
 }

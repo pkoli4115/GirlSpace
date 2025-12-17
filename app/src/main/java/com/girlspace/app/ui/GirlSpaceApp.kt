@@ -73,12 +73,12 @@ fun GirlSpaceApp() {
         LaunchedEffect(sharedVideoUri) {
             val uriStr = sharedVideoUri
             if (!uriStr.isNullOrBlank()) {
-                navController.navigate("reelCreateFromGallery") { launchSingleTop = true }
-                // The screen will read DeepLinkStore.sharedVideoUri
-                // (we clear after the screen reads it; for now keep it until screen opens)
-                // If you prefer immediate clear, tell me — but keeping it avoids races.
+                val encoded = Uri.encode(uriStr)
+                navController.navigate("reelCreate/$encoded") { launchSingleTop = true }
+                DeepLinkStore.clearSharedVideoUri()
             }
         }
+
 
         NavHost(
             navController = navController,
@@ -382,30 +382,7 @@ fun GirlSpaceApp() {
                 )
             }
 
-            /* ---------------------------------------------------
-               REELS CREATE ROUTES (to prevent crash)
-            ---------------------------------------------------- */
-            composable("reelCapture") {
-                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
-                    title = "Record (Camera)",
-                    onDone = { navController.popBackStack() }
-                )
-            }
-
-            composable("reelGalleryPick") {
-                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
-                    title = "Pick from Gallery",
-                    onDone = { navController.popBackStack() }
-                )
-            }
-
-            composable("reelYoutube") {
-                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
-                    title = "Add YouTube URL",
-                    onDone = { navController.popBackStack() }
-                )
-            }
-            composable("reelCapture") {
+                composable("reelCapture") {
                 ReelCaptureScreen(onBack = { navController.popBackStack() })
             }
 
@@ -429,11 +406,12 @@ fun GirlSpaceApp() {
                     videoUriString = videoUri,
                     onBack = { navController.popBackStack() },
                     onCreated = { reelId ->
-                        // After upload → open viewer on the new reel
                         navController.navigate("reelsViewer/$reelId") {
                             launchSingleTop = true
+                            popUpTo("reelGalleryPick") { inclusive = true } // removes picker + create screens
                         }
                     }
+
                 )
             }
 

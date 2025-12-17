@@ -16,10 +16,11 @@ import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.ChatBubbleOutline
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Share
@@ -50,25 +51,28 @@ fun ReelsViewerScreen(
     startReelId: String,
     onBack: () -> Unit
 ) {
-    val vm: ReelsViewerViewModel = hiltViewModel()
+    val vm: ReelsViewModel = hiltViewModel()
     val videoVm: VideoPlaybackViewModel = hiltViewModel()
 
     val reels by vm.reels.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
+
     val comments by vm.comments.collectAsState()
     val commentsLoading by vm.commentsLoading.collectAsState()
+    val commentsCanLoadMore by vm.commentsCanLoadMore.collectAsState()
+    val commentsForReelId by vm.commentsForReelId.collectAsState()
 
     val context = LocalContext.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
 
-    // For volume-key behavior (optional, but you had it before)
     val audioManager = remember {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
 
     LaunchedEffect(startReelId) {
-        vm.loadForViewer(startReelId)
+        vm.loadInitial()
+        vm.ensureReelInList(startReelId)
     }
 
     BackHandler {
@@ -76,40 +80,30 @@ fun ReelsViewerScreen(
         onBack()
     }
 
-    // Ensure the composable can receive key events (volume keys)
     LaunchedEffect(Unit) {
         view.isFocusableInTouchMode = true
         view.requestFocus()
     }
 
-    // ✅ Fit/Fill toggle
     var fillScreen by remember { mutableStateOf(true) }
     val resizeMode = if (fillScreen) {
-        AspectRatioFrameLayout.RESIZE_MODE_ZOOM // Fill (crop)
+        AspectRatioFrameLayout.RESIZE_MODE_ZOOM
     } else {
-        AspectRatioFrameLayout.RESIZE_MODE_FIT  // Fit (letterbox)
+        AspectRatioFrameLayout.RESIZE_MODE_FIT
     }
-
-    // Show comments sheet for which reel
-    val commentsForReelId = vm.showCommentsForReelId
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
             .onPreviewKeyEvent { event ->
-                // Keep system volume behavior; only sync mute state heuristically.
                 if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onPreviewKeyEvent false
-
                 when (event.nativeKeyEvent.keyCode) {
                     KeyEvent.KEYCODE_VOLUME_UP -> {
-                        // If user raises volume, unmute inside player.
                         if (videoVm.muted.value) videoVm.toggleMute()
                         false
                     }
-
                     KeyEvent.KEYCODE_VOLUME_DOWN -> {
-                        // If volume reaches 0, auto-mute the player.
                         scope.launch {
                             delay(60)
                             val vol = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
@@ -119,41 +113,35 @@ fun ReelsViewerScreen(
                         }
                         false
                     }
-
                     else -> false
                 }
             }
             .focusable()
     ) {
-
-        // ---------------------------
-        // Loading / empty safety
-        // ---------------------------
+        // Loading/empty safety
         if (reels.isEmpty() && isLoading) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
-            IconButton(
-                onClick = {
+            TopBackBar(
+                onBack = {
                     videoVm.pauseActive()
                     onBack()
                 },
-                modifier = Modifier.align(Alignment.TopStart).padding(12.dp)
-            ) {
-                Icon(Icons.Filled.Close, contentDescription = "Back", tint = Color.White)
-            }
+                fillScreen = fillScreen,
+                onToggleFitFill = { fillScreen = !fillScreen }
+            )
             return@Box
         }
 
         if (reels.isEmpty()) {
             Text("No reels yet", color = Color.White, modifier = Modifier.align(Alignment.Center))
-            IconButton(
-                onClick = {
+            TopBackBar(
+                onBack = {
                     videoVm.pauseActive()
                     onBack()
                 },
-                modifier = Modifier.align(Alignment.TopStart).padding(12.dp)
-            ) {
-                Icon(Icons.Filled.Close, contentDescription = "Back", tint = Color.White)
-            }
+                fillScreen = fillScreen,
+                onToggleFitFill = { fillScreen = !fillScreen }
+            )
             return@Box
         }
 
@@ -166,9 +154,6 @@ fun ReelsViewerScreen(
             pageCount = { reels.size }
         )
 
-        // ---------------------------
-        // Fullscreen vertical pager
-        // ---------------------------
         VerticalPager(
             state = pagerState,
             modifier = Modifier.fillMaxSize()
@@ -177,12 +162,11 @@ fun ReelsViewerScreen(
             val provider = (reel.source["provider"] as? String).orEmpty()
             val isPageActive = pagerState.currentPage == page
 
-            // Autoplay when page becomes active
             LaunchedEffect(isPageActive, reel.id, provider, reel.videoUrl) {
                 if (!isPageActive) return@LaunchedEffect
+                vm.onReelViewed(reel.id)
 
                 if (provider.equals("youtube_url", ignoreCase = true)) {
-                    // Link-out only
                     videoVm.pauseActive()
                 } else {
                     val url = reel.videoUrl
@@ -208,74 +192,74 @@ fun ReelsViewerScreen(
 
         val currentReel = reels.getOrNull(pagerState.currentPage)
 
-        // ---------------------------
-        // Top controls: Back + Fit/Fill
-        // ---------------------------
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(top = 10.dp, start = 6.dp, end = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = {
+        // Top: back + fit/fill
+        TopBackBar(
+            onBack = {
                 videoVm.pauseActive()
                 onBack()
-            }) {
-                Icon(Icons.Filled.Close, contentDescription = "Back", tint = Color.White)
-            }
+            },
+            fillScreen = fillScreen,
+            onToggleFitFill = { fillScreen = !fillScreen }
+        )
 
-            Spacer(modifier = Modifier.weight(1f))
-
-            IconButton(onClick = { fillScreen = !fillScreen }) {
-                Icon(
-                    imageVector = Icons.Filled.AspectRatio,
-                    contentDescription = if (fillScreen) "Fit" else "Fill",
-                    tint = Color.White
-                )
-            }
-        }
-
-        // ---------------------------
-        // Right actions: Like / Comment / Share
-        // ---------------------------
+        // Right actions: Like / Comment / Share (bigger targets + counts)
         Column(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .padding(end = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            val r = currentReel
+            val reelId = r?.id.orEmpty()
+
             // LIKE
-            IconButton(
-                onClick = {
-                    val r = currentReel ?: return@IconButton
-                    vm.toggleLike(r)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(
+                    onClick = { if (r != null) vm.toggleLike(r) },
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    val liked = r?.let { vm.isLiked(it.id) } == true
+                    Icon(
+                        imageVector = if (liked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                        contentDescription = "Like",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
-            ) {
-                Icon(Icons.Filled.Favorite, contentDescription = "Like", tint = Color.White)
+                Text(
+                    text = (r?.likeCount() ?: 0L).toString(),
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
+                )
             }
 
-            // COMMENT
-            IconButton(
-                onClick = {
-                    val r = currentReel ?: return@IconButton
-                    vm.openComments(r.id)
+            // COMMENT (bigger tap)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                IconButton(
+                    onClick = { if (reelId.isNotBlank()) vm.openComments(reelId) },
+                    modifier = Modifier.size(56.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.ChatBubbleOutline,
+                        contentDescription = "Comment",
+                        tint = Color.White,
+                        modifier = Modifier.size(28.dp)
+                    )
                 }
-            ) {
-                Icon(
-                    Icons.Filled.ChatBubbleOutline,
-                    contentDescription = "Comment",
-                    tint = Color.White
+                Text(
+                    text = "Comments",
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelSmall
                 )
             }
 
             // SHARE
             IconButton(
                 onClick = {
-                    val r = currentReel ?: return@IconButton
-                    val deepLink = "togetherly://reels/${r.id}"
-                    val label = if (r.durationSec <= 60) "Reel" else "Video"
+                    val rr = currentReel ?: return@IconButton
+                    val deepLink = "togetherly://reels/${rr.id}"
+                    val label = if (rr.durationSec <= 60) "Reel" else "Video"
                     val text = "Check this $label on Togetherly\n\n$deepLink"
 
                     val intent = Intent(Intent.ACTION_SEND).apply {
@@ -283,16 +267,15 @@ fun ReelsViewerScreen(
                         putExtra(Intent.EXTRA_TEXT, text)
                     }
                     context.startActivity(Intent.createChooser(intent, "Share via"))
-                    scope.launch { vm.logShare(r.id) }
-                }
+                    scope.launch { vm.logShare(rr.id) }
+                },
+                modifier = Modifier.size(56.dp)
             ) {
-                Icon(Icons.Filled.Share, contentDescription = "Share", tint = Color.White)
+                Icon(Icons.Filled.Share, contentDescription = "Share", tint = Color.White, modifier = Modifier.size(28.dp))
             }
         }
 
-        // ---------------------------
-        // Mute/Sound overlay chip
-        // ---------------------------
+        // Mute chip
         val isMuted by videoVm.muted.collectAsState()
         val chipShape = RoundedCornerShape(14.dp)
         Column(
@@ -310,9 +293,7 @@ fun ReelsViewerScreen(
                 contentDescription = "Toggle audio",
                 tint = Color.White
             )
-
             Spacer(modifier = Modifier.height(4.dp))
-
             Text(
                 text = if (isMuted) "Muted" else "Sound",
                 color = Color.White,
@@ -320,9 +301,7 @@ fun ReelsViewerScreen(
             )
         }
 
-        // ---------------------------
-        // Bottom: Playback controls (Play/Pause + Seekbar + time)
-        // ---------------------------
+        // Bottom playback controls (kept)
         ReelsPlaybackControls(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
@@ -332,24 +311,55 @@ fun ReelsViewerScreen(
         )
     }
 
-    // ---------------------------
     // Comments sheet
-    // ---------------------------
-    if (!commentsForReelId.isNullOrBlank()) {
-        val rid = commentsForReelId
-
+    val rid = commentsForReelId
+    if (!rid.isNullOrBlank()) {
         ReelCommentsSheet(
             title = "Comments",
             comments = comments,
             isLoading = commentsLoading,
-            onLoadMore = { vm.loadMoreComments() },
+            onLoadMore = { if (commentsCanLoadMore) vm.loadMoreComments() },
             onDismiss = { vm.closeComments() },
-            onSend = { text ->
-                vm.addComment(rid, text)
-            }
+            onSend = { text -> vm.addComment(rid, text) }
         )
     }
 }
+
+@Composable
+private fun TopBackBar(
+    onBack: () -> Unit,
+    fillScreen: Boolean,
+    onToggleFitFill: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, start = 6.dp, end = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.size(48.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Filled.ArrowBack,
+                contentDescription = "Back",
+                tint = Color.White
+            )
+        }
+
+        Spacer(modifier = Modifier.weight(1f))
+
+        IconButton(onClick = onToggleFitFill) {
+            Icon(
+                imageVector = Icons.Filled.AspectRatio,
+                contentDescription = if (fillScreen) "Fit" else "Fill",
+                tint = Color.White
+            )
+        }
+    }
+}
+
 @Composable
 private fun ReelsPlaybackControls(
     modifier: Modifier,
@@ -361,7 +371,6 @@ private fun ReelsPlaybackControls(
     var positionMs by remember { mutableStateOf(0L) }
     var isPlaying by remember { mutableStateOf(false) }
 
-    // Poll player state (simple + reliable)
     LaunchedEffect(Unit) {
         while (true) {
             durationMs = max(0L, player.duration)

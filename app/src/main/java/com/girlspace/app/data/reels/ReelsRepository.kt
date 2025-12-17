@@ -1,5 +1,15 @@
 package com.girlspace.app.data.reels
+import com.google.firebase.storage.OnProgressListener
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.callbackFlow
 
+import com.google.firebase.storage.UploadTask
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
@@ -18,7 +28,6 @@ import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
 
-
 @Singleton
 class ReelsRepository @Inject constructor() {
 
@@ -26,15 +35,36 @@ class ReelsRepository @Inject constructor() {
     private val firestore: FirebaseFirestore = FirebaseFirestore.getInstance()
     private val storage: FirebaseStorage = FirebaseStorage.getInstance()
 
-
     private val reelsCol get() = firestore.collection("reels")
 
     // ---------- Paging ----------
     data class Page(
         val items: List<Reel>,
         val nextCursorCreatedAt: Timestamp?,
-        val nextCursorId: String?
+        val nextCursorId: String?,
+        val likedByMeIds: Set<String> = emptySet()
     )
+
+    data class CommentsCursor(
+        val createdAt: Timestamp,
+        val id: String
+    )
+
+    suspend fun getReelById(reelId: String): Reel? {
+        val doc = reelsCol.document(reelId).get().await()
+        return doc.toObject(Reel::class.java)?.copy(id = doc.id)
+    }
+
+    suspend fun incrementView(reelId: String) {
+        val reelRef = reelsCol.document(reelId)
+        firestore.runTransaction { tx ->
+            val snap = tx.get(reelRef)
+            val metrics = (snap.get("metrics") as? Map<*, *>) ?: emptyMap<Any, Any>()
+            val current = (metrics["views"] as? Number)?.toLong() ?: 0L
+            tx.update(reelRef, "metrics.views", current + 1)
+            null
+        }.await()
+    }
 
     suspend fun loadPage(
         pageSize: Long,
@@ -47,7 +77,6 @@ class ReelsRepository @Inject constructor() {
             .limit(pageSize)
 
         if (cursorCreatedAt != null && !cursorId.isNullOrBlank()) {
-            // composite cursor for stable paging
             q = q.startAfter(cursorCreatedAt, cursorId)
         }
 
@@ -58,7 +87,31 @@ class ReelsRepository @Inject constructor() {
         val lastCreated = last?.getTimestamp("createdAt")
         val lastId = last?.id
 
-        return Page(reels, lastCreated, lastId)
+        // ✅ also load liked-by-me state for this page (works on all SDKs; no getAll())
+        val uid = auth.currentUser?.uid
+        val likedIds: Set<String> = if (uid.isNullOrBlank() || reels.isEmpty()) {
+            emptySet()
+        } else {
+            coroutineScope {
+                reels.map { r ->
+                    async {
+                        val likeSnap = reelsCol.document(r.id)
+                            .collection("likes")
+                            .document(uid)
+                            .get()
+                            .await()
+                        if (likeSnap.exists()) r.id else null
+                    }
+                }.awaitAll().filterNotNull().toSet()
+            }
+        }
+
+        return Page(
+            items = reels,
+            nextCursorCreatedAt = lastCreated,
+            nextCursorId = lastId,
+            likedByMeIds = likedIds
+        )
     }
 
     suspend fun loadTopReels(limit: Long = 15): List<Reel> {
@@ -98,19 +151,22 @@ class ReelsRepository @Inject constructor() {
                         .collection("notifications")
                         .document()
 
-                    tx.set(notifRef, mapOf(
-                        "id" to notifRef.id,
-                        "title" to (auth.currentUser?.displayName ?: "Someone"),
-                        "body" to "liked your reel",
-                        "category" to "REEL",
-                        "type" to "reel_like",
-                        "createdAt" to FieldValue.serverTimestamp(),
-                        "read" to false,
-                        "senderId" to uid,
-                        "entityId" to reelRef.id,
-                        "deepLink" to "togetherly://reels/${reelRef.id}",
-                        "importance" to "NORMAL"
-                    ))
+                    tx.set(
+                        notifRef,
+                        mapOf(
+                            "id" to notifRef.id,
+                            "title" to (auth.currentUser?.displayName ?: "Someone"),
+                            "body" to "liked your reel",
+                            "category" to "REEL",
+                            "type" to "reel_like",
+                            "createdAt" to FieldValue.serverTimestamp(),
+                            "read" to false,
+                            "senderId" to uid,
+                            "entityId" to reelRef.id,
+                            "deepLink" to "togetherly://reels/${reelRef.id}",
+                            "importance" to "NORMAL"
+                        )
+                    )
                 }
             }
             null
@@ -118,8 +174,13 @@ class ReelsRepository @Inject constructor() {
     }
 
     // ---------- Comments ----------
-    suspend fun addComment(reelId: String, text: String) {
-        val uid = auth.currentUser?.uid ?: return
+    /**
+     * ✅ IMPORTANT:
+     * - We DO NOT write "id" field in comment document.
+     * - ReelComment uses @DocumentId to populate id.
+     */
+    suspend fun addComment(reelId: String, text: String): ReelComment {
+        val uid = auth.currentUser?.uid ?: throw IllegalStateException("Not logged in")
         val authorName = auth.currentUser?.displayName ?: "User"
 
         val reelRef = reelsCol.document(reelId)
@@ -129,14 +190,17 @@ class ReelsRepository @Inject constructor() {
             val reelSnap = tx.get(reelRef)
             val ownerId = reelSnap.getString("authorId") ?: ""
 
-            tx.set(commentRef, mapOf(
-                "id" to commentRef.id,
-                "reelId" to reelId,
-                "authorId" to uid,
-                "authorName" to authorName,
-                "text" to text,
-                "createdAt" to FieldValue.serverTimestamp()
-            ))
+            // ✅ NO "id" FIELD HERE
+            tx.set(
+                commentRef,
+                mapOf(
+                    "reelId" to reelId,
+                    "authorId" to uid,
+                    "authorName" to authorName,
+                    "text" to text,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
 
             // notify owner
             if (ownerId.isNotBlank() && ownerId != uid) {
@@ -145,36 +209,64 @@ class ReelsRepository @Inject constructor() {
                     .collection("notifications")
                     .document()
 
-                tx.set(notifRef, mapOf(
-                    "id" to notifRef.id,
-                    "title" to authorName,
-                    "body" to "commented: ${text.take(80)}",
-                    "category" to "REEL",
-                    "type" to "reel_comment",
-                    "createdAt" to FieldValue.serverTimestamp(),
-                    "read" to false,
-                    "senderId" to uid,
-                    "entityId" to reelId,
-                    "deepLink" to "togetherly://reels/$reelId",
-                    "importance" to "NORMAL"
-                ))
+                tx.set(
+                    notifRef,
+                    mapOf(
+                        "id" to notifRef.id,
+                        "title" to authorName,
+                        "body" to "commented: ${text.take(80)}",
+                        "category" to "REEL",
+                        "type" to "reel_comment",
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "read" to false,
+                        "senderId" to uid,
+                        "entityId" to reelId,
+                        "deepLink" to "togetherly://reels/$reelId",
+                        "importance" to "NORMAL"
+                    )
+                )
             }
             null
         }.await()
+
+        // Return a usable local object for immediate UI insert
+        return ReelComment(
+            id = commentRef.id,
+            reelId = reelId,
+            authorId = uid,
+            authorName = authorName,
+            text = text,
+            createdAt = Timestamp.now()
+        )
     }
 
-    suspend fun loadCommentsPage(reelId: String, pageSize: Long, cursor: Timestamp?): Pair<List<ReelComment>, Timestamp?> {
+    suspend fun loadCommentsPage(
+        reelId: String,
+        pageSize: Long,
+        cursor: CommentsCursor?
+    ): Pair<List<ReelComment>, CommentsCursor?> {
         var q = reelsCol.document(reelId)
             .collection("comments")
             .orderBy("createdAt", Query.Direction.DESCENDING)
+            .orderBy("__name__", Query.Direction.DESCENDING)
             .limit(pageSize)
 
-        if (cursor != null) q = q.startAfter(cursor)
+        if (cursor != null) {
+            q = q.startAfter(cursor.createdAt, cursor.id)
+        }
 
         val snap = q.get().await()
-        val list = snap.documents.mapNotNull { it.toObject(ReelComment::class.java)?.copy(id = it.id) }
-        val next = snap.documents.lastOrNull()?.getTimestamp("createdAt")
-        return list to next
+        val list = snap.documents.mapNotNull { it.toObject(ReelComment::class.java) }
+
+        val last = snap.documents.lastOrNull()
+        val lastCreated = last?.getTimestamp("createdAt")
+        val lastId = last?.id
+
+        val nextCursor = if (lastCreated != null && !lastId.isNullOrBlank()) {
+            CommentsCursor(createdAt = lastCreated, id = lastId)
+        } else null
+
+        return list to nextCursor
     }
 
     // ---------- Shares ----------
@@ -188,11 +280,14 @@ class ReelsRepository @Inject constructor() {
             val metrics = (reelSnap.get("metrics") as? Map<*, *>) ?: emptyMap<Any, Any>()
             val currentShares = (metrics["shares"] as? Number)?.toLong() ?: 0L
 
-            tx.set(shareRef, mapOf(
-                "id" to shareRef.id,
-                "userId" to uid,
-                "createdAt" to FieldValue.serverTimestamp()
-            ))
+            tx.set(
+                shareRef,
+                mapOf(
+                    "id" to shareRef.id,
+                    "userId" to uid,
+                    "createdAt" to FieldValue.serverTimestamp()
+                )
+            )
             tx.update(reelRef, "metrics.shares", currentShares + 1)
             null
         }.await()
@@ -225,6 +320,115 @@ class ReelsRepository @Inject constructor() {
         } finally {
             try { r.release() } catch (_: Throwable) {}
         }
+    }
+    data class UploadProgress(
+        val stage: String,
+        val progress: Float,        // 0f..1f
+        val done: Boolean = false,
+        val reelId: String? = null,
+        val error: String? = null
+    )
+
+    fun uploadReelWithProgress(
+        context: Context,
+        videoUri: Uri,
+        caption: String,
+        tags: List<String>,
+        visibility: String = "PUBLIC"
+    ): Flow<UploadProgress> = callbackFlow {
+        val uid = auth.currentUser?.uid
+        if (uid.isNullOrBlank()) {
+            trySend(UploadProgress("Error", 0f, error = "Not logged in"))
+            close()
+            return@callbackFlow
+        }
+
+        val authorName = auth.currentUser?.displayName ?: "User"
+
+        try {
+            val info = readVideoInfo(context, videoUri)
+            if (info.durationSec !in 20..180) {
+                trySend(UploadProgress("Error", 0f, error = "Video must be between 20 and 180 seconds."))
+                close()
+                return@callbackFlow
+            }
+
+            val reelId = UUID.randomUUID().toString()
+            val videoRef = storage.reference.child("reels/$uid/$reelId.mp4")
+            val thumbRef = storage.reference.child("reels/$uid/$reelId.jpg")
+
+            // -------------------------
+            // Stage 1: Video upload (0..0.75)
+            // -------------------------
+            trySend(UploadProgress("Uploading video", 0f))
+
+            val videoTask: UploadTask = videoRef.putFile(videoUri)
+
+            val videoListener = OnProgressListener<UploadTask.TaskSnapshot> { snap: UploadTask.TaskSnapshot ->
+                val total = snap.totalByteCount
+                val transferred = snap.bytesTransferred
+                val pct = if (total > 0L) transferred.toFloat() / total.toFloat() else 0f
+                trySend(UploadProgress("Uploading video", (pct * 0.75f).coerceIn(0f, 0.75f)))
+            }
+
+            videoTask.addOnProgressListener(videoListener)
+            videoTask.await()
+            videoTask.removeOnProgressListener(videoListener)
+
+            val videoUrl = videoRef.downloadUrl.await().toString()
+
+            // -------------------------
+            // Stage 2: Thumbnail upload (0.75..0.92)
+            // -------------------------
+            trySend(UploadProgress("Uploading thumbnail", 0.76f))
+
+            val thumbBytes = generateThumbnailJpeg(context, videoUri)
+            val thumbTask = thumbRef.putBytes(thumbBytes)
+
+            val thumbListener = OnProgressListener<UploadTask.TaskSnapshot> { snap: UploadTask.TaskSnapshot ->
+                val total = snap.totalByteCount
+                val transferred = snap.bytesTransferred
+                val pct = if (total > 0L) transferred.toFloat() / total.toFloat() else 0f
+                val mapped = 0.75f + (pct * 0.17f)
+                trySend(UploadProgress("Uploading thumbnail", mapped.coerceIn(0.75f, 0.92f)))
+            }
+
+            thumbTask.addOnProgressListener(thumbListener)
+            thumbTask.await()
+            thumbTask.removeOnProgressListener(thumbListener)
+
+            val thumbUrl = thumbRef.downloadUrl.await().toString()
+
+            // -------------------------
+            // Stage 3: Save Firestore (0.92..1.0)
+            // -------------------------
+            trySend(UploadProgress("Saving reel", 0.93f))
+
+            reelsCol.document(reelId).set(
+                mapOf(
+                    "videoUrl" to videoUrl,
+                    "thumbnailUrl" to thumbUrl,
+                    "durationSec" to info.durationSec,
+                    "caption" to caption,
+                    "authorId" to uid,
+                    "authorName" to authorName,
+                    "visibility" to visibility,
+                    "tags" to tags,
+                    "createdAt" to Timestamp.now(),
+                    "createdAtServer" to FieldValue.serverTimestamp(),
+                    "source" to mapOf("provider" to "user_upload"),
+                    "metrics" to mapOf("views" to 0, "likes" to 0, "shares" to 0)
+                )
+            ).await()
+
+            trySend(UploadProgress("File uploaded successfully ✅", 1f, done = true, reelId = reelId))
+            close()
+        } catch (t: Throwable) {
+            trySend(UploadProgress("Upload failed", 0f, error = t.message ?: "Unknown error"))
+            close()
+        }
+
+        awaitClose { }
     }
     suspend fun uploadReel(
         context: Context,
@@ -278,5 +482,4 @@ class ReelsRepository @Inject constructor() {
 
         return reelId
     }
-
 }

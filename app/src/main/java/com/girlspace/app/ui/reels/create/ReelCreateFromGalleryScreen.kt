@@ -1,11 +1,11 @@
 package com.girlspace.app.ui.reels.create
-import com.girlspace.app.ui.reels.ReelsRefreshBus
+
 import android.net.Uri
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
@@ -13,7 +13,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.girlspace.app.data.reels.ReelsRepository
+import com.girlspace.app.ui.reels.ReelsRefreshBus
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -31,6 +33,14 @@ class ReelCreateViewModel @Inject constructor(
     var durationSec by mutableStateOf<Int?>(null)
         private set
 
+    // Progress UI state
+    var stage by mutableStateOf("")
+        private set
+    var progress by mutableStateOf(0f)
+        private set
+    var uploadedReelId by mutableStateOf<String?>(null)
+        private set
+
     fun clearError() { error = null }
 
     fun loadInfo(context: android.content.Context, uri: Uri) {
@@ -45,7 +55,13 @@ class ReelCreateViewModel @Inject constructor(
         }
     }
 
-    fun upload(
+    fun progressColor(p: Float): Color = when {
+        p < 0.4f -> Color(0xFFE53935) // red
+        p < 0.8f -> Color(0xFFFFA000) // amber
+        else -> Color(0xFF43A047)     // green
+    }
+
+    fun uploadWithProgress(
         context: android.content.Context,
         uri: Uri,
         caption: String,
@@ -55,17 +71,37 @@ class ReelCreateViewModel @Inject constructor(
             try {
                 isBusy = true
                 error = null
-                val reelId = repo.uploadReel(
+                uploadedReelId = null
+                stage = "Starting…"
+                progress = 0f
+
+                repo.uploadReelWithProgress(
                     context = context,
                     videoUri = uri,
                     caption = caption,
-                    tags = emptyList()
-                )
+                    tags = emptyList(),
+                    visibility = "PUBLIC"
+                ).collect { u ->
+                    stage = u.stage
+                    progress = u.progress.coerceIn(0f, 1f)
 
-// 🔥 THIS LINE MAKES IT APPEAR IN REELS TAB
-                ReelsRefreshBus.notifyRefresh()
+                    if (!u.error.isNullOrBlank()) {
+                        error = u.error
+                    }
 
-                onDone(reelId)
+                    if (u.done && !u.reelId.isNullOrBlank()) {
+                        uploadedReelId = u.reelId
+                        progress = 1f
+
+                        // 🔥 Make it appear in Reels tab immediately
+                        ReelsRefreshBus.notifyRefresh()
+
+                        // ✅ Let user SEE success for a moment
+                        delay(900)
+
+                        onDone(u.reelId)
+                    }
+                }
             } catch (t: Throwable) {
                 error = t.message ?: "Upload failed"
             } finally {
@@ -87,9 +123,7 @@ fun ReelCreateFromGalleryScreen(
 
     val uri = remember(videoUriString) { Uri.parse(Uri.decode(videoUriString)) }
 
-    LaunchedEffect(uri) {
-        vm.loadInfo(context, uri)
-    }
+    LaunchedEffect(uri) { vm.loadInfo(context, uri) }
 
     var caption by remember { mutableStateOf(TextFieldValue("")) }
 
@@ -108,9 +142,7 @@ fun ReelCreateFromGalleryScreen(
         topBar = {
             TopAppBar(
                 title = { Text("Create") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { Text("Back") }
-                }
+                navigationIcon = { IconButton(onClick = onBack) { Text("Back") } }
             )
         }
     ) { padding ->
@@ -134,8 +166,40 @@ fun ReelCreateFromGalleryScreen(
                 onValueChange = { caption = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Caption") },
-                maxLines = 3
+                maxLines = 3,
+                enabled = !vm.isBusy
             )
+
+            // ✅ Upload progress UI
+            if (vm.isBusy) {
+                val pct = (vm.progress * 100).toInt().coerceIn(0, 100)
+                val c = vm.progressColor(vm.progress)
+
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(vm.stage.ifBlank { "Uploading…" }, style = MaterialTheme.typography.titleMedium)
+                        LinearProgressIndicator(
+                            progress = { vm.progress },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(10.dp),
+                            color = c
+                        )
+                        Text(
+                            text = "$pct%",
+                            style = MaterialTheme.typography.headlineMedium,
+                            color = c
+                        )
+
+                        if (!vm.uploadedReelId.isNullOrBlank()) {
+                            Text("File uploaded successfully ✅", color = Color(0xFF43A047))
+                            Text("It will now appear in Reels.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
 
             vm.error?.let { msg ->
                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
@@ -152,7 +216,7 @@ fun ReelCreateFromGalleryScreen(
             val canSubmit = (dur != null && dur in 20..180) && !vm.isBusy
             Button(
                 onClick = {
-                    vm.upload(
+                    vm.uploadWithProgress(
                         context = context,
                         uri = uri,
                         caption = caption.text
@@ -163,13 +227,7 @@ fun ReelCreateFromGalleryScreen(
                 enabled = canSubmit,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                if (vm.isBusy) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(10.dp))
-                    Text("Uploading…")
-                } else {
-                    Text("Upload")
-                }
+                Text(if (vm.isBusy) "Uploading…" else "Upload")
             }
         }
     }

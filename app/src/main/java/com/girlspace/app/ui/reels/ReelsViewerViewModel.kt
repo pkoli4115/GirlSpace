@@ -33,7 +33,7 @@ class ReelsViewerViewModel @Inject constructor(
     var showCommentsForReelId: String? = null
         private set
 
-    private var commentsCursor: Timestamp? = null
+    private var commentsCursor: ReelsRepository.CommentsCursor? = null
     private var commentsEnd = false
 
     fun loadForViewer(startReelId: String) {
