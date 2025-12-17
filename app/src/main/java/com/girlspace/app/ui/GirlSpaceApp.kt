@@ -1,5 +1,5 @@
 package com.girlspace.app.ui
-
+import com.girlspace.app.ui.video.ReelsViewerScreen
 import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -341,6 +341,17 @@ fun GirlSpaceApp() {
                         vm = chatVm
                     )
                 }
+            }
+            composable(
+                route = "reelsViewer/{startPostId}",
+                arguments = listOf(navArgument("startPostId") { type = NavType.StringType })
+            ) { backStackEntry ->
+                val postId = backStackEntry.arguments?.getString("startPostId") ?: return@composable
+
+                ReelsViewerScreen(
+                    startPostId = postId,
+                    onBack = { navController.popBackStack() }
+                )
             }
 
             /* ---------------------------------------------------

@@ -32,7 +32,8 @@ sealed class FeedItem {
         val id: String,
         val videoUrl: String,
         val thumbnailUrl: String?,
-        val createdAt: Long
+        val createdAt: Long,
+        val caption: String = ""
     ) : FeedItem() {
         override val key: String = "reel_$id"
     }

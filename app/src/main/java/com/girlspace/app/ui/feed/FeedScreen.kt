@@ -1,5 +1,12 @@
 package com.girlspace.app.ui.feed
-
+import androidx.compose.ui.graphics.Brush
+import kotlinx.coroutines.delay
+import androidx.compose.runtime.collectAsState
+import com.girlspace.app.ui.feed.InlineVideoPlayer
+import androidx.compose.material.icons.filled.PlayArrow
+import com.girlspace.app.ui.video.VideoPlaybackViewModel
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import android.content.Intent
 import android.net.Uri
 import android.util.Log
@@ -60,7 +67,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -102,6 +108,7 @@ fun FeedScreen(
     onOpenCreatePost: () -> Unit,
     navController: NavHostController,
 ) {
+    val videoVm: VideoPlaybackViewModel = hiltViewModel()
     val vm: FeedViewModel = hiltViewModel()
     val styleVm: FeedStyleViewModel = hiltViewModel()
     val feedItems by vm.feedItems.collectAsState()
@@ -112,18 +119,20 @@ fun FeedScreen(
     LaunchedEffect(Unit) {
         Log.e("FEED_RELEASE", "FeedScreen entered (LaunchedEffect)")
     }
-    Log.e("FEED_RELEASE", "FeedScreen recomposed")
-    Log.e(
-        "FEED_RELEASE",
-        "FeedScreen state: items=${feedItems.size}, loading=$isInitialLoading, error=$errorMessage"
-    )
+
+    // Track which videos have been “entered” at least once so UI doesn’t revert to thumbnail
+    var startedVideoIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+
+    val enableAutoPlay = true
 
     val premiumRequired by vm.premiumRequired.collectAsState()
     val maxImages by vm.currentMaxImages.collectAsState()
-    val posts = vm.posts.collectAsState().value
 
     val feedVibe by styleVm.currentVibe.collectAsState()
     val quickVibes = styleVm.quickVibes
+
+    // Active video according to feed visibility logic
+    var activeVideoPostId by remember { mutableStateOf<String?>(null) }
 
     val planLimits by PlanLimitsRepository.planLimits.collectAsState()
     val maxImagesAllowed = planLimits.maxImagesPerPost
@@ -133,10 +142,11 @@ fun FeedScreen(
     val firestore = remember { FirebaseFirestore.getInstance() }
     val context = LocalContext.current
 
-    // ✅ Ad integration change: preload native ads on feed entry (safe)
-    LaunchedEffect(Unit) {
-        vm.ensureAdsLoaded(context)
-    }
+    val isMuted by videoVm.muted.collectAsState()
+    val activeId by videoVm.activePostId.collectAsState()
+
+    // ✅ preload native ads on feed entry (safe)
+    LaunchedEffect(Unit) { vm.ensureAdsLoaded(context) }
 
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -196,6 +206,72 @@ fun FeedScreen(
             }
     }
 
+    /**
+     * ✅ AUTOPLAY (VISIBLE FIX):
+     * We already pick the “most visible” video post.
+     * The missing part earlier was UI: PostCard showed thumbnail unless user tapped.
+     * Now: when a post becomes active candidate, we mark it started so the player renders.
+     */
+    LaunchedEffect(listState, feedItems, enableAutoPlay) {
+        snapshotFlow { listState.layoutInfo }
+            .distinctUntilChanged()
+            .collect { info ->
+                if (!enableAutoPlay) return@collect
+
+                val viewportStart = info.viewportStartOffset
+                val viewportEnd = info.viewportEndOffset
+
+                var bestPostId: String? = null
+                var bestFraction = 0f
+                var bestUrl: String? = null
+
+                info.visibleItemsInfo.forEach { vi ->
+                    val key = vi.key as? String ?: return@forEach
+                    if (!key.startsWith("post_")) return@forEach
+
+                    val postId = key.removePrefix("post_")
+                    val postItem = feedItems
+                        .asSequence()
+                        .filterIsInstance<FeedItem.PostItem>()
+                        .firstOrNull { it.post.postId == postId }
+                        ?: return@forEach
+
+                    val url = postItem.post.videoUrls.firstOrNull() ?: return@forEach
+
+                    val itemTop = vi.offset
+                    val itemBottom = vi.offset + vi.size
+                    val visibleTop = maxOf(itemTop, viewportStart)
+                    val visibleBottom = minOf(itemBottom, viewportEnd)
+                    val visiblePx = (visibleBottom - visibleTop).coerceAtLeast(0)
+                    val fraction = if (vi.size > 0) visiblePx.toFloat() / vi.size.toFloat() else 0f
+
+                    if (fraction > bestFraction) {
+                        bestFraction = fraction
+                        bestPostId = postId
+                        bestUrl = url
+                    }
+                }
+
+                val candidateId = if (bestFraction >= 0.60f) bestPostId else null
+                val candidateUrl = bestUrl
+
+                if (candidateId != null && !candidateUrl.isNullOrBlank()) {
+                    // ✅ critical: ensure UI switches from thumbnail → player automatically
+                    startedVideoIds = startedVideoIds + candidateId
+
+                    if (activeVideoPostId != candidateId) {
+                        activeVideoPostId = candidateId
+                        videoVm.requestPlay(candidateId, candidateUrl, autoplay = true)
+                    }
+                } else {
+                    if (activeVideoPostId != null) {
+                        activeVideoPostId = null
+                        videoVm.pauseActive()
+                    }
+                }
+            }
+    }
+
     // Media prefetch for hero/top images
     LaunchedEffect(feedItems) {
         val urls = feedItems.take(12).flatMap { item ->
@@ -213,7 +289,6 @@ fun FeedScreen(
     var showNewPostsBadge by remember { mutableStateOf(false) }
     var newPostsCount by remember { mutableStateOf(0) }
 
-    // Track when new items appear at the top while user is not at top
     LaunchedEffect(feedItems) {
         val newTopKey = feedItems.firstOrNull()?.key
         if (newTopKey != null) {
@@ -237,7 +312,6 @@ fun FeedScreen(
         }
     }
 
-    // Scroll-to-top FAB visibility + clearing new-post badge when at top
     var showScrollToTop by remember { mutableStateOf(false) }
 
     LaunchedEffect(listState) {
@@ -253,7 +327,6 @@ fun FeedScreen(
             }
     }
 
-    // Full-screen media viewer
     var mediaViewerState by remember { mutableStateOf<MediaViewerState?>(null) }
 
     Box(
@@ -261,20 +334,15 @@ fun FeedScreen(
             .fillMaxSize()
             .background(feedVibe.backgroundBrush)
     ) {
-
         when {
             isInitialLoading && feedItems.isEmpty() -> {
-                // Initial spinner
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
+                ) { CircularProgressIndicator() }
             }
 
             !isInitialLoading && feedItems.isEmpty() -> {
-                // Empty / low content state
                 EmptyFeedStateCard(
                     vibe = feedVibe,
                     onCreateFirstPost = onOpenCreatePost
@@ -287,7 +355,6 @@ fun FeedScreen(
                     state = listState,
                     contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
-                    // Vibe quick toggle row
                     item(key = "vibe_toggle") {
                         VibeToggleRow(
                             currentVibeKey = feedVibe.key,
@@ -296,8 +363,8 @@ fun FeedScreen(
                         )
                     }
 
-                    // Top composer card
-                    item(key = "composer_prompt") {
+                    item(key = "composer_prompt")
+                    {
                         WhatsOnYourMindRow(
                             userName = currentUser?.displayName,
                             onClick = onOpenCreatePost,
@@ -310,6 +377,80 @@ fun FeedScreen(
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f)
                         )
                     }
+                    item(key = "reels_strip") {
+
+                        // Take reels already present in feedItems (seed reels / reel items)
+                        val reels = feedItems
+                            .asSequence()
+                            .filterIsInstance<FeedItem.ReelItem>()
+                            .take(20)
+                            .toList()
+
+                        if (reels.isNotEmpty()) {
+                            LazyRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp),
+                                contentPadding = PaddingValues(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                itemsIndexed(
+                                    items = reels,
+                                    key = { _, r -> "strip_${r.key}" }
+                                ) { _, r ->
+                                    Card(
+                                        modifier = Modifier
+                                            .width(160.dp)
+                                            .height(220.dp)
+                                            .clickable {
+                                                // open reels viewer starting from this reel
+                                                navController.navigate("reelsViewer/${r.key}")
+                                            },
+                                        shape = RoundedCornerShape(18.dp),
+                                        elevation = CardDefaults.cardElevation(4.dp)
+                                    ) {
+                                        Box(Modifier.fillMaxSize()) {
+                                            AsyncImage(
+                                                model = r.thumbnailUrl,
+                                                contentDescription = "Reel",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop
+                                            )
+
+                                            // soft caption overlay (safe)
+                                            val caption = r.caption.trim()
+                                            if (caption.isNotBlank()) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .align(Alignment.BottomStart)
+                                                        .fillMaxWidth()
+                                                        .background(Color.Black.copy(alpha = 0.35f))
+                                                        .padding(8.dp)
+                                                ) {
+                                                    Text(
+                                                        text = caption,
+                                                        color = Color.White,
+                                                        style = MaterialTheme.typography.labelMedium,
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                }
+                                            }
+
+                                        }
+                                    }
+                                }
+                            }
+
+                            Divider(
+                                modifier = Modifier
+                                    .padding(horizontal = 12.dp)
+                                    .fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
+                            )
+                        }
+                    }
+
 
                     itemsIndexed(
                         items = feedItems,
@@ -319,7 +460,7 @@ fun FeedScreen(
                                 is FeedItem.EvergreenCard -> "evergreen_${item.key}_$index"
                                 is FeedItem.PostItem -> "post_${item.post.postId}"
                                 is FeedItem.ReelItem -> "reel_${item.key}_$index"
-                                is FeedItem.AdItem -> "ad_${item.adId}"     // ✅ THIS IS THE IMPORTANT PART
+                                is FeedItem.AdItem -> "ad_${item.adId}"
                                 is FeedItem.LoadingBlock -> "loading_$index"
                                 is FeedItem.ErrorBlock -> "error_${item.message}_$index"
                             }
@@ -327,10 +468,7 @@ fun FeedScreen(
                     ) { _, item ->
                         when (item) {
                             is FeedItem.TopPicks -> {
-                                TopPicksRow(
-                                    picks = item.picks,
-                                    vibe = feedVibe
-                                )
+                                TopPicksRow(picks = item.picks, vibe = feedVibe)
                                 Divider(
                                     modifier = Modifier
                                         .padding(horizontal = 12.dp)
@@ -353,22 +491,17 @@ fun FeedScreen(
                                 val post = item.post
                                 val authorUid = post.uid
                                 val isSaved = savedPostIds.contains(post.postId)
-
-                                // Is current user already following this post's author?
                                 val isFollowing = currentUser?.uid != null && followingIds.contains(authorUid)
 
                                 PostCard(
                                     post = post,
-                                    onAuthorClick = { authorId ->
-                                        navController.navigate("profile/$authorId")
-                                    },
+                                    onAuthorClick = { authorId -> navController.navigate("profile/$authorId") },
                                     currentUserId = currentUser?.uid,
                                     isSaved = isSaved,
                                     isFollowing = isFollowing,
                                     onToggleFollow = {
                                         val uid = currentUser?.uid ?: return@PostCard
                                         if (authorUid.isBlank() || authorUid == uid) return@PostCard
-
                                         val userRef = firestore.collection("users").document(uid)
                                         val currentlyFollowing = followingIds.contains(authorUid)
 
@@ -414,46 +547,55 @@ fun FeedScreen(
                                         }
                                     },
                                     onComment = { text -> vm.addComment(post.postId, text) },
-                                    onOpenMedia = { urls, index ->
-                                        mediaViewerState = MediaViewerState(urls, index)
+                                    onOpenMedia = { urls, index -> mediaViewerState = MediaViewerState(urls, index) },
+
+                                    // ✅ video wiring
+                                    videoVm = videoVm,
+                                    activeVideoPostId = activeVideoPostId,
+                                    startedVideoIds = startedVideoIds,
+                                    onRequestPlayVideo = { postId ->
+                                        activeVideoPostId = postId
+                                        startedVideoIds = startedVideoIds + postId
+                                        val url = post.videoUrls.firstOrNull().orEmpty()
+                                        if (url.isNotBlank()) videoVm.requestPlay(postId, url, autoplay = true)
+                                    },
+                                    onStopVideo = { postId ->
+                                        if (activeVideoPostId == postId) activeVideoPostId = null
+                                        videoVm.stop(postId)
+                                    },
+                                    onOpenReelsViewer = { startPostId ->
+                                        // ✅ you confirmed route: reelsViewer/{startPostId}
+                                        navController.navigate("reelsViewer/$startPostId")
                                     },
                                     feedVibe = feedVibe
                                 )
                             }
 
                             is FeedItem.ReelItem -> {
-                                ReelCard(item, feedVibe)
-                                Divider(
-                                    modifier = Modifier
-                                        .padding(horizontal = 12.dp)
-                                        .fillMaxWidth(),
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.04f)
+                                ReelCard(
+                                    reel = item,
+                                    vibe = feedVibe,
+                                    onOpenReel = { reelKey ->
+                                        navController.navigate("reelsViewer/$reelKey")
+                                    }
                                 )
                             }
+
 
                             is FeedItem.AdItem -> {
                                 if (item.nativeAd != null) {
                                     NativeAdCard(nativeAd = item.nativeAd)
                                 } else {
-                                    AdCard(item, feedVibe) // fallback for your old fake ads (optional)
+                                    AdCard(item, feedVibe)
                                 }
                             }
 
-
-                            is FeedItem.LoadingBlock -> {
-                                LoadingRow()
-                            }
-
-                            is FeedItem.ErrorBlock -> {
-                                ErrorRow(item.message)
-                            }
+                            is FeedItem.LoadingBlock -> LoadingRow()
+                            is FeedItem.ErrorBlock -> ErrorRow(item.message)
                         }
                     }
 
-                    if (isPaging) {
-                        item { LoadingRow() }
-                    }
-
+                    if (isPaging) item { LoadingRow() }
                 }
             }
         }
@@ -461,11 +603,7 @@ fun FeedScreen(
         if (errorMessage != null) {
             AlertDialog(
                 onDismissRequest = { vm.clearError() },
-                confirmButton = {
-                    TextButton(onClick = { vm.clearError() }) {
-                        Text("OK")
-                    }
-                },
+                confirmButton = { TextButton(onClick = { vm.clearError() }) { Text("OK") } },
                 title = { Text("Error") },
                 text = { Text(errorMessage ?: "") }
             )
@@ -474,11 +612,7 @@ fun FeedScreen(
         if (premiumRequired) {
             AlertDialog(
                 onDismissRequest = { vm.clearPremiumRequired() },
-                confirmButton = {
-                    TextButton(onClick = { vm.clearPremiumRequired() }) {
-                        Text("OK")
-                    }
-                },
+                confirmButton = { TextButton(onClick = { vm.clearPremiumRequired() }) { Text("OK") } },
                 title = { Text("Premium feature") },
                 text = {
                     Text(
@@ -519,7 +653,6 @@ fun FeedScreen(
             )
         }
 
-        // 🔔 New posts badge
         if (showNewPostsBadge && newPostsCount > 0) {
             NewPostsBadge(
                 count = newPostsCount,
@@ -537,14 +670,9 @@ fun FeedScreen(
             )
         }
 
-        // ⬆️ Scroll-to-top FAB
         if (showScrollToTop) {
             SmallFloatingActionButton(
-                onClick = {
-                    coroutineScope.launch {
-                        listState.animateScrollToItem(0)
-                    }
-                },
+                onClick = { coroutineScope.launch { listState.animateScrollToItem(0) } },
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(16.dp),
@@ -552,10 +680,7 @@ fun FeedScreen(
                 contentColor = MaterialTheme.colorScheme.primary,
                 elevation = FloatingActionButtonDefaults.elevation(4.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Filled.ArrowUpward,
-                    contentDescription = "Scroll to top"
-                )
+                Icon(imageVector = Icons.Filled.ArrowUpward, contentDescription = "Scroll to top")
             }
         }
     }
@@ -582,9 +707,7 @@ private fun VibeToggleRow(
     ) {
         Text(
             text = "Vibe",
-            style = MaterialTheme.typography.labelLarge.copy(
-                fontWeight = FontWeight.SemiBold
-            ),
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
@@ -604,10 +727,7 @@ private fun VibeToggleRow(
             Text(
                 text = vibe.label,
                 modifier = Modifier
-                    .background(
-                        color = bg,
-                        shape = RoundedCornerShape(999.dp)
-                    )
+                    .background(color = bg, shape = RoundedCornerShape(999.dp))
                     .clickable { onVibeSelected(vibe.key) }
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.labelMedium,
@@ -629,23 +749,16 @@ private fun WhatsOnYourMindRow(
             .padding(horizontal = 12.dp, vertical = 8.dp)
             .clickable(onClick = onClick),
         shape = vibe.cardShape,
-        colors = CardDefaults.cardColors(
-            containerColor = vibe.composerBackground
-        ),
+        colors = CardDefaults.cardColors(containerColor = vibe.composerBackground),
         elevation = CardDefaults.cardElevation(vibe.cardElevation),
-        border = BorderStroke(
-            width = 1.dp,
-            color = vibe.composerBorderColor
-        )
+        border = BorderStroke(width = 1.dp, color = vibe.composerBorderColor)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 12.dp)
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
                     modifier = Modifier.size(40.dp),
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
@@ -662,9 +775,7 @@ private fun WhatsOnYourMindRow(
                 Column {
                     Text(
                         text = "What's on your mind today?",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontWeight = FontWeight.Medium
-                        ),
+                        style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium),
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f)
                     )
                     Text(
@@ -675,7 +786,6 @@ private fun WhatsOnYourMindRow(
                 }
             }
 
-            // 💬 Suggestion chips
             Spacer(modifier = Modifier.height(8.dp))
             Row(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -690,10 +800,7 @@ private fun WhatsOnYourMindRow(
 }
 
 @Composable
-private fun SuggestionChip(
-    label: String,
-    onClick: () -> Unit
-) {
+private fun SuggestionChip(label: String, onClick: () -> Unit) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelSmall,
@@ -709,22 +816,13 @@ private fun SuggestionChip(
 }
 
 @Composable
-private fun EmptyFeedStateCard(
-    vibe: FeedVibe,
-    onCreateFirstPost: () -> Unit
-) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
+private fun EmptyFeedStateCard(vibe: FeedVibe, onCreateFirstPost: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Card(
-            modifier = Modifier
-                .padding(horizontal = 24.dp),
+            modifier = Modifier.padding(horizontal = 24.dp),
             shape = vibe.cardShape,
             elevation = CardDefaults.cardElevation(vibe.cardElevation),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)
-            )
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f))
         ) {
             Column(
                 modifier = Modifier.padding(20.dp),
@@ -733,9 +831,7 @@ private fun EmptyFeedStateCard(
             ) {
                 Text(
                     text = "Your space is quiet 🌙",
-                    style = MaterialTheme.typography.titleMedium.copy(
-                        fontWeight = FontWeight.SemiBold
-                    )
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
                 )
                 Text(
                     text = "Follow a few people or share your first post to start the vibe.",
@@ -743,19 +839,14 @@ private fun EmptyFeedStateCard(
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                TextButton(onClick = onCreateFirstPost) {
-                    Text("Create your first post")
-                }
+                TextButton(onClick = onCreateFirstPost) { Text("Create your first post") }
             }
         }
     }
 }
 
 @Composable
-fun TopPicksRow(
-    picks: List<TopPickData>,
-    vibe: FeedVibe
-) {
+fun TopPicksRow(picks: List<TopPickData>, vibe: FeedVibe) {
     LazyRow(
         modifier = Modifier
             .fillMaxWidth()
@@ -807,12 +898,7 @@ fun EvergreenCard(card: FeedItem.EvergreenCard, vibe: FeedVibe) {
         elevation = CardDefaults.cardElevation(vibe.cardElevation)
     ) {
         Column(Modifier.padding(16.dp)) {
-            Text(
-                card.title,
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.SemiBold
-                )
-            )
+            Text(card.title, style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 card.caption,
@@ -853,11 +939,16 @@ fun AdCard(ad: FeedItem.AdItem, vibe: FeedVibe) {
 }
 
 @Composable
-fun ReelCard(reel: FeedItem.ReelItem, vibe: FeedVibe) {
+fun ReelCard(
+    reel: FeedItem.ReelItem,
+    vibe: FeedVibe,
+    onOpenReel: (String) -> Unit
+) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .clickable { onOpenReel(reel.key) },
         shape = vibe.cardShape,
         elevation = CardDefaults.cardElevation(vibe.cardElevation)
     ) {
@@ -866,6 +957,7 @@ fun ReelCard(reel: FeedItem.ReelItem, vibe: FeedVibe) {
                 .fillMaxWidth()
                 .height(260.dp)
         ) {
+            // Thumbnail
             if (reel.thumbnailUrl != null) {
                 AsyncImage(
                     model = reel.thumbnailUrl,
@@ -873,19 +965,43 @@ fun ReelCard(reel: FeedItem.ReelItem, vibe: FeedVibe) {
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop
                 )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = "Reel",
-                        color = Color.White,
-                        style = MaterialTheme.typography.titleMedium
+            }
+
+            // ▶️ Play icon overlay
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                    .padding(14.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "Play reel",
+                    tint = Color.White,
+                    modifier = Modifier.size(36.dp)
+                )
+            }
+
+            // 🌈 Bottom gradient overlay (caption-ready)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            colors = listOf(
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.45f)
+                            )
+                        )
                     )
-                }
+                    .padding(8.dp)
+            ) {
+                Text(
+                    text = "Watch reel", // placeholder-safe
+                    color = Color.White,
+                    style = MaterialTheme.typography.labelMedium
+                )
             }
         }
     }
@@ -899,10 +1015,7 @@ fun LoadingRow() {
             .padding(16.dp),
         contentAlignment = Alignment.Center
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(28.dp),
-            strokeWidth = 3.dp
-        )
+        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
     }
 }
 
@@ -914,11 +1027,7 @@ fun ErrorRow(message: String) {
             .padding(16.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.error
-        )
+        Text(text = message, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
     }
 }
 
@@ -941,17 +1050,22 @@ fun PostCard(
     onToggleSave: () -> Unit,
     onComment: (String) -> Unit,
     onOpenMedia: (List<String>, Int) -> Unit,
+
+    // video
+    activeVideoPostId: String?,
+    startedVideoIds: Set<String>,
+    onRequestPlayVideo: (String) -> Unit,
+    onStopVideo: (String) -> Unit,
+    onOpenReelsViewer: (String) -> Unit,
+    videoVm: VideoPlaybackViewModel,
     feedVibe: FeedVibe
 ) {
     val context = LocalContext.current
+    val isMuted by videoVm.muted.collectAsState()
     val firestore = remember { FirebaseFirestore.getInstance() }
 
-    val sdf = remember {
-        SimpleDateFormat("MMM d • h:mm a", Locale.getDefault())
-    }
-    val dateText = remember(post.createdAt) {
-        post.createdAt?.toDate()?.let { sdf.format(it) } ?: ""
-    }
+    val sdf = remember { SimpleDateFormat("MMM d • h:mm a", Locale.getDefault()) }
+    val dateText = remember(post.createdAt) { post.createdAt?.toDate()?.let { sdf.format(it) } ?: "" }
 
     var showMoreMenu by remember { mutableStateOf(false) }
     var showCommentBox by remember(post.postId) { mutableStateOf(false) }
@@ -972,9 +1086,7 @@ fun PostCard(
             .limit(50)
             .addSnapshotListener { snap, err ->
                 if (err != null) return@addSnapshotListener
-                val list = snap?.documents
-                    ?.mapNotNull { it.toObject(Comment::class.java) }
-                    ?: emptyList()
+                val list = snap?.documents?.mapNotNull { it.toObject(Comment::class.java) } ?: emptyList()
                 comments = list
             }
 
@@ -986,9 +1098,7 @@ fun PostCard(
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp),
         shape = feedVibe.cardShape,
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)
-        ),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f)),
         elevation = CardDefaults.cardElevation(feedVibe.cardElevation)
     ) {
         Column(
@@ -996,12 +1106,11 @@ fun PostCard(
                 .fillMaxWidth()
                 .padding(12.dp)
         ) {
-            // Header: avatar + name + time + follow + 3-dots
+            // Header
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                // LEFT: avatar + name/time (clickable → open profile)
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier
@@ -1012,9 +1121,7 @@ fun PostCard(
                         AsyncImage(
                             model = post.authorPhoto,
                             contentDescription = "Author photo",
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape),
+                            modifier = Modifier.size(40.dp).clip(CircleShape),
                             contentScale = ContentScale.Crop
                         )
                     } else {
@@ -1037,9 +1144,7 @@ fun PostCard(
                     Column {
                         Text(
                             text = post.authorName ?: "GirlSpace User",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.SemiBold
-                            )
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
                         )
                         if (dateText.isNotBlank()) {
                             Text(
@@ -1051,7 +1156,6 @@ fun PostCard(
                     }
                 }
 
-                // MIDDLE: Follow / Following (only for other users)
                 if (currentUserId != null && currentUserId != post.uid) {
                     TextButton(onClick = onToggleFollow) {
                         Text(
@@ -1062,43 +1166,26 @@ fun PostCard(
                     }
                 }
 
-                // RIGHT: 3-dots menu
                 Box {
                     IconButton(onClick = { showMoreMenu = true }) {
-                        Icon(
-                            imageVector = Icons.Filled.MoreVert,
-                            contentDescription = "More actions"
-                        )
+                        Icon(imageVector = Icons.Filled.MoreVert, contentDescription = "More actions")
                     }
-                    DropdownMenu(
-                        expanded = showMoreMenu,
-                        onDismissRequest = { showMoreMenu = false }
-                    ) {
+                    DropdownMenu(expanded = showMoreMenu, onDismissRequest = { showMoreMenu = false }) {
                         DropdownMenuItem(
                             text = { Text(if (isSaved) "Unsave" else "Save") },
-                            onClick = {
-                                showMoreMenu = false
-                                onToggleSave()
-                            }
+                            onClick = { showMoreMenu = false; onToggleSave() }
                         )
                         if (currentUserId != null && currentUserId == post.uid) {
                             DropdownMenuItem(
                                 text = { Text("Delete post") },
-                                onClick = {
-                                    showMoreMenu = false
-                                    onDelete()
-                                }
+                                onClick = { showMoreMenu = false; onDelete() }
                             )
                         }
                         DropdownMenuItem(
                             text = { Text("Report") },
                             onClick = {
                                 showMoreMenu = false
-                                Toast.makeText(
-                                    context,
-                                    "Thanks, we’ve received your report.",
-                                    Toast.LENGTH_SHORT
-                                ).show()
+                                Toast.makeText(context, "Thanks, we’ve received your report.", Toast.LENGTH_SHORT).show()
                             }
                         )
                     }
@@ -1116,17 +1203,19 @@ fun PostCard(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            if (post.imageUrls.isNotEmpty()) {
+            val displayImages = if (post.videoUrls.isNotEmpty()) post.imageUrls.drop(1) else post.imageUrls
+
+            if (displayImages.isNotEmpty()) {
                 LazyRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    itemsIndexed(post.imageUrls) { index, url ->
+                    itemsIndexed(displayImages) { index, url ->
                         Card(
                             modifier = Modifier
                                 .height(220.dp)
                                 .fillParentMaxWidth(0.8f)
-                                .clickable { onOpenMedia(post.imageUrls, index) },
+                                .clickable { onOpenMedia(displayImages, index) },
                             shape = RoundedCornerShape(16.dp),
                             elevation = CardDefaults.cardElevation(2.dp)
                         ) {
@@ -1142,9 +1231,102 @@ fun PostCard(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
-            Row(
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            // ✅ Inline video (AUTOPLAY FIXED VISUALLY)
+            if (post.videoUrls.isNotEmpty()) {
+                val videoUrl = post.videoUrls.first()
+                val thumbUrl = post.imageUrls.firstOrNull()
+                val isActive = activeVideoPostId == post.postId
+
+                // ✅ started becomes true either when user taps OR when feed marks it active
+                var started by remember(post.postId) { mutableStateOf(false) }
+                LaunchedEffect(isActive, startedVideoIds) {
+                    if (isActive || startedVideoIds.contains(post.postId)) started = true
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(260.dp),
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(2.dp)
+                ) {
+                    Box(modifier = Modifier.fillMaxSize()) {
+
+                        if (!started) {
+                            if (!thumbUrl.isNullOrBlank()) {
+                                AsyncImage(
+                                    model = thumbUrl,
+                                    contentDescription = "Video thumbnail",
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop
+                                )
+                            } else {
+                                Box(modifier = Modifier.fillMaxSize().background(Color.Black))
+                            }
+
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clickable {
+                                        started = true
+                                        onRequestPlayVideo(post.postId)
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Surface(color = Color.Black.copy(alpha = 0.35f), shape = CircleShape) {
+                                    Icon(
+                                        imageVector = Icons.Filled.PlayArrow,
+                                        contentDescription = "Play",
+                                        tint = Color.White,
+                                        modifier = Modifier.padding(18.dp).size(42.dp)
+                                    )
+                                }
+                            }
+                        } else {
+                            // ✅ If Feed made it active, ensure this post owns the shared player
+                            LaunchedEffect(isActive, videoUrl) {
+                                if (isActive && videoUrl.isNotBlank()) {
+                                    videoVm.requestPlay(post.postId, videoUrl, autoplay = true)
+                                }
+                            }
+
+                            // Tap video opens full-screen reels viewer
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .clickable { onOpenReelsViewer(post.postId) }
+                            ) {
+                                InlineVideoPlayer(
+                                    videoVm = videoVm,
+                                    postId = post.postId,
+                                    url = videoUrl,
+                                    modifier = Modifier.fillMaxSize(),
+                                    showController = false
+                                )
+                            }
+                        }
+
+                        // Mute toggle
+                        IconButton(
+                            onClick = { videoVm.toggleMute() },
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(10.dp)
+                                .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                        ) {
+                            Icon(
+                                imageVector = if (isMuted) Icons.Filled.VolumeOff else Icons.Filled.VolumeUp,
+                                contentDescription = "Toggle audio",
+                                tint = Color.White
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 val isLiked = currentUserId != null && post.likedBy.contains(currentUserId)
                 val likeColor by animateColorAsState(
                     targetValue = if (isLiked) feedVibe.likeAccent else MaterialTheme.colorScheme.onSurface,
@@ -1158,10 +1340,7 @@ fun PostCard(
                 IconButton(
                     onClick = onLike,
                     modifier = Modifier
-                        .shadow(
-                            elevation = if (isLiked) 6.dp else 0.dp,
-                            shape = CircleShape
-                        )
+                        .shadow(elevation = if (isLiked) 6.dp else 0.dp, shape = CircleShape)
                         .background(
                             color = if (isLiked) feedVibe.likeAccent.copy(alpha = 0.22f) else Color.Transparent,
                             shape = CircleShape
@@ -1171,18 +1350,13 @@ fun PostCard(
                         imageVector = if (isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
                         contentDescription = "Like",
                         tint = likeColor,
-                        modifier = Modifier.graphicsLayer {
-                            scaleX = likeScale
-                            scaleY = likeScale
-                        }
+                        modifier = Modifier.graphicsLayer { scaleX = likeScale; scaleY = likeScale }
                     )
                 }
 
                 Text(
                     text = "${post.likeCount} likes",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontWeight = FontWeight.Medium
-                    ),
+                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
                     color = MaterialTheme.colorScheme.onSurface
                 )
 
@@ -1196,10 +1370,7 @@ fun PostCard(
                 )
 
                 IconButton(onClick = { showCommentBox = !showCommentBox }) {
-                    Icon(
-                        imageVector = Icons.Filled.ChatBubbleOutline,
-                        contentDescription = "View comments"
-                    )
+                    Icon(imageVector = Icons.Filled.ChatBubbleOutline, contentDescription = "View comments")
                 }
 
                 Spacer(modifier = Modifier.weight(1f))
@@ -1207,11 +1378,7 @@ fun PostCard(
                 IconButton(
                     onClick = {
                         val shareText = buildString {
-                            if (post.text.isNotBlank()) {
-                                append(post.text.trim())
-                            } else {
-                                append("Check out this post on Togetherly!")
-                            }
+                            if (post.text.isNotBlank()) append(post.text.trim()) else append("Check out this post on Togetherly!")
                             append("\n\n")
                             append("Open in Togetherly: https://togetherly.app/post/${post.postId}")
                         }
@@ -1222,26 +1389,16 @@ fun PostCard(
                         }
 
                         try {
-                            context.startActivity(
-                                Intent.createChooser(intent, "Share post via")
-                            )
+                            context.startActivity(Intent.createChooser(intent, "Share post via"))
                         } catch (_: Exception) {
-                            Toast.makeText(
-                                context,
-                                "No app available to share.",
-                                Toast.LENGTH_SHORT
-                            ).show()
+                            Toast.makeText(context, "No app available to share.", Toast.LENGTH_SHORT).show()
                         }
                     }
                 ) {
-                    Icon(
-                        imageVector = Icons.Filled.Share,
-                        contentDescription = "Share post"
-                    )
+                    Icon(imageVector = Icons.Filled.Share, contentDescription = "Share post")
                 }
             }
 
-            // Simple engagement indicator for your own posts
             if (currentUserId != null && currentUserId == post.uid) {
                 val interactions = (post.likeCount ?: 0) + (post.commentsCount ?: 0)
                 if (interactions > 0) {
@@ -1289,10 +1446,7 @@ fun PostCard(
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.SemiBold
                                     )
-                                    Text(
-                                        text = c.text,
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
+                                    Text(text = c.text, style = MaterialTheme.typography.bodySmall)
                                 }
                             }
                         }
@@ -1323,9 +1477,7 @@ fun PostCard(
                                 commentText = ""
                             }
                         }
-                    ) {
-                        Text("Post")
-                    }
+                    ) { Text("Post") }
                 }
             }
         }
@@ -1348,8 +1500,7 @@ fun CreatePostScreen(
     ) { uris ->
         if (uris.size > maxImagesAllowed) {
             selectedImages = uris.take(maxImagesAllowed)
-            limitWarning =
-                "Your current plan allows up to $maxImagesAllowed images per post. Extra images were ignored."
+            limitWarning = "Your current plan allows up to $maxImagesAllowed images per post. Extra images were ignored."
         } else {
             selectedImages = uris
             limitWarning = null
@@ -1366,10 +1517,7 @@ fun CreatePostScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                text = "Create post",
-                style = MaterialTheme.typography.headlineSmall
-            )
+            Text(text = "Create post", style = MaterialTheme.typography.headlineSmall)
 
             OutlinedTextField(
                 modifier = Modifier
@@ -1398,11 +1546,7 @@ fun CreatePostScreen(
                                         }
                                         context.startActivity(intent)
                                     } catch (_: Exception) {
-                                        Toast.makeText(
-                                            context,
-                                            "Cannot open image",
-                                            Toast.LENGTH_SHORT
-                                        ).show()
+                                        Toast.makeText(context, "Cannot open image", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                         ) {
@@ -1418,20 +1562,14 @@ fun CreatePostScreen(
             }
 
             if (limitWarning != null) {
-                Text(
-                    text = limitWarning ?: "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
+                Text(text = limitWarning ?: "", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
 
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                TextButton(onClick = { imagePickerLauncher.launch("image/*") }) {
-                    Text("Add photos")
-                }
+                TextButton(onClick = { imagePickerLauncher.launch("image/*") }) { Text("Add photos") }
 
                 Spacer(modifier = Modifier.weight(1f))
 
@@ -1440,15 +1578,12 @@ fun CreatePostScreen(
                 TextButton(
                     onClick = {
                         if (selectedImages.size > maxImagesAllowed) {
-                            limitWarning =
-                                "Your current plan allows up to $maxImagesAllowed images per post."
+                            limitWarning = "Your current plan allows up to $maxImagesAllowed images per post."
                         } else {
                             onPost(text, selectedImages)
                         }
                     }
-                ) {
-                    Text("Post")
-                }
+                ) { Text("Post") }
             }
 
             Text(

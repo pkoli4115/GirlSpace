@@ -257,7 +257,7 @@ fun HomeRoot(
                     )
 
 
-                    HomeTab.Reels -> ReelsTab()
+                    HomeTab.Reels -> com.girlspace.app.ui.reels.ReelsTabScreen(navController = navController)
 
                     HomeTab.Chats -> ChatsScreen(
                         onOpenThread = { thread ->

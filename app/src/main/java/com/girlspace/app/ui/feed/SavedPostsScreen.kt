@@ -1,8 +1,6 @@
 package com.girlspace.app.ui.feed
-import androidx.compose.foundation.layout.width
+
 import android.util.Log
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.compose.runtime.collectAsState
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,9 +11,9 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -27,9 +25,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,18 +38,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
 import com.girlspace.app.data.feed.Post
-import com.girlspace.app.data.feed.Comment
+import com.girlspace.app.ui.video.VideoPlaybackViewModel
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
-import java.util.Locale
-import java.text.SimpleDateFormat
-import androidx.navigation.NavHostController
+
 data class SavedPostPreview(
     val postId: String = "",
     val authorId: String? = null,
@@ -64,16 +62,20 @@ data class SavedPostPreview(
 fun SavedPostsScreen(
     navController: NavHostController,
     viewModel: SavedPostsViewModel = hiltViewModel<SavedPostsViewModel>()
-)
-{
-
+) {
+    val videoVm: VideoPlaybackViewModel = hiltViewModel()
     val auth = remember { FirebaseAuth.getInstance() }
     val user = auth.currentUser
     val firestore = remember { FirebaseFirestore.getInstance() }
+
     val styleVm: FeedStyleViewModel = hiltViewModel()
     val feedVibe by styleVm.currentVibe.collectAsState()
 
     var items by remember { mutableStateOf<List<SavedPostPreview>>(emptyList()) }
+
+    // ✅ Video state (same pattern as Feed)
+    var activeVideoPostId by remember { mutableStateOf<String?>(null) }
+    var startedVideoIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     // Selected post overlay state
     var selectedPostId by remember { mutableStateOf<String?>(null) }
@@ -82,9 +84,10 @@ fun SavedPostsScreen(
     var isLoadingPost by remember { mutableStateOf(false) }
     var postError by remember { mutableStateOf<String?>(null) }
 
-    // Following for this user
+    // Following for this user (your existing subcollection approach)
     var followingIds by remember { mutableStateOf<Set<String>>(emptySet()) }
 
+    // Feed vm (your existing usage)
     val feedVm: FeedViewModel = viewModel()
 
     // Listen to saved posts list
@@ -114,13 +117,14 @@ fun SavedPostsScreen(
                         savedAtMillis = ts?.toDate()?.time
                     )
                 } ?: emptyList()
+
                 items = list.sortedByDescending { it.savedAtMillis ?: 0L }
             }
 
         onDispose { reg.remove() }
     }
 
-    // Listen to following list
+    // Listen to following list (your existing structure)
     DisposableEffect(user?.uid) {
         var reg: ListenerRegistration? = null
         val uid = user?.uid
@@ -222,43 +226,47 @@ fun SavedPostsScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (user == null) {
-                Text(
-                    text = "Please sign in to see saved posts.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else if (items.isEmpty()) {
-                Text(
-                    text = "You haven’t saved any posts yet.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    items(items, key = { it.postId }) { saved ->
-                        SavedPostRow(
-                            saved = saved,
-                            onClick = { selectedPostId = saved.postId }
-                        )
+            when {
+                user == null -> {
+                    Text(
+                        text = "Please sign in to see saved posts.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
+                items.isEmpty() -> {
+                    Text(
+                        text = "You haven’t saved any posts yet.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(items, key = { it.postId }) { saved ->
+                            SavedPostRow(
+                                saved = saved,
+                                onClick = { selectedPostId = saved.postId }
+                            )
+                        }
                     }
                 }
             }
 
             // Full-screen post overlay
-            selectedPostId?.let { _ ->
+            selectedPostId?.let {
                 Surface(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black.copy(alpha = 0.4f))
                 ) {
                     Box(modifier = Modifier.fillMaxSize()) {
-                        BackHandler {
-                            selectedPostId = null
-                        }
+                        BackHandler { selectedPostId = null }
 
                         Column(
                             modifier = Modifier
@@ -314,10 +322,9 @@ fun SavedPostsScreen(
                                                     p.uid != user.uid &&
                                                     followingIds.contains(p.uid)
 
-                                        LazyColumn(
-                                            modifier = Modifier.fillMaxSize()
-                                        ) {
+                                        LazyColumn(modifier = Modifier.fillMaxSize()) {
                                             item {
+                                                // ✅ This now matches your project’s PostCard signature
                                                 PostCard(
                                                     post = p,
                                                     onAuthorClick = { authorId ->
@@ -401,11 +408,28 @@ fun SavedPostsScreen(
                                                         feedVm.addComment(p.postId, text)
                                                     },
                                                     onOpenMedia = { _, _ ->
-                                                        // For now we keep media handling simple here.
+                                                        // Keeping simple here (same as your current behavior)
                                                     },
+                                                    activeVideoPostId = activeVideoPostId,
+                                                    startedVideoIds = startedVideoIds,
+                                                    onRequestPlayVideo = { postId ->
+                                                        activeVideoPostId = postId
+                                                        startedVideoIds = startedVideoIds + postId
+                                                        val url = p.videoUrls.firstOrNull().orEmpty()
+                                                        if (url.isNotBlank()) {
+                                                            videoVm.requestPlay(postId, url, autoplay = true)
+                                                        }
+                                                    },
+                                                    onStopVideo = { postId ->
+                                                        if (activeVideoPostId == postId) activeVideoPostId = null
+                                                        videoVm.stop(postId)
+                                                    },
+                                                    onOpenReelsViewer = { startPostId ->
+                                                        navController.navigate("reelsViewer/$startPostId")
+                                                    },
+                                                    videoVm = videoVm,
                                                     feedVibe = feedVibe
                                                 )
-
                                             }
                                         }
                                     }
@@ -435,8 +459,7 @@ private fun SavedPostRow(
             AsyncImage(
                 model = saved.previewImage,
                 contentDescription = null,
-                modifier = Modifier
-                    .size(56.dp),
+                modifier = Modifier.size(56.dp),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop
             )
             Spacer(modifier = Modifier.width(12.dp))
