@@ -1,5 +1,9 @@
 package com.girlspace.app.ui
-import com.girlspace.app.ui.video.ReelsViewerScreen
+import com.girlspace.app.ui.reels.create.ReelCaptureScreen
+import com.girlspace.app.ui.reels.create.ReelGalleryPickScreen
+import com.girlspace.app.ui.reels.create.ReelYoutubeScreen
+import com.girlspace.app.ui.reels.create.ReelCreateFromGalleryScreen
+
 import android.net.Uri
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -42,6 +46,9 @@ fun GirlSpaceApp() {
     VibeTheme(themeMode = themeMode) {
         val navController = rememberNavController()
         val openThreadId by DeepLinkStore.openChatThreadId.collectAsState()
+        val sharedText by DeepLinkStore.sharedText.collectAsState()
+        val sharedVideoUri by DeepLinkStore.sharedVideoUri.collectAsState()
+
 
         // Deep link handling
         LaunchedEffect(openThreadId) {
@@ -49,6 +56,27 @@ fun GirlSpaceApp() {
             if (!tid.isNullOrBlank()) {
                 navController.navigate("chat/$tid") { launchSingleTop = true }
                 DeepLinkStore.clearChat()
+            }
+
+        }
+// ✅ Share: text/link → open YouTube/link import screen
+        LaunchedEffect(sharedText) {
+            val text = sharedText
+            if (!text.isNullOrBlank()) {
+                navController.navigate("reelYoutube") { launchSingleTop = true }
+                // The screen will read DeepLinkStore.sharedText (next step if needed)
+                DeepLinkStore.clearSharedText()
+            }
+        }
+
+// ✅ Share: video uri → open gallery upload screen with prefilled uri
+        LaunchedEffect(sharedVideoUri) {
+            val uriStr = sharedVideoUri
+            if (!uriStr.isNullOrBlank()) {
+                navController.navigate("reelCreateFromGallery") { launchSingleTop = true }
+                // The screen will read DeepLinkStore.sharedVideoUri
+                // (we clear after the screen reads it; for now keep it until screen opens)
+                // If you prefer immediate clear, tell me — but keeping it avoids races.
             }
         }
 
@@ -343,16 +371,72 @@ fun GirlSpaceApp() {
                 }
             }
             composable(
-                route = "reelsViewer/{startPostId}",
-                arguments = listOf(navArgument("startPostId") { type = NavType.StringType })
+                route = "reelsViewer/{startReelId}",
+                arguments = listOf(navArgument("startReelId") { type = NavType.StringType })
             ) { backStackEntry ->
-                val postId = backStackEntry.arguments?.getString("startPostId") ?: return@composable
+                val reelId = backStackEntry.arguments?.getString("startReelId") ?: return@composable
 
-                ReelsViewerScreen(
-                    startPostId = postId,
+                com.girlspace.app.ui.reels.ReelsViewerScreen(
+                    startReelId = reelId,
                     onBack = { navController.popBackStack() }
                 )
             }
+
+            /* ---------------------------------------------------
+               REELS CREATE ROUTES (to prevent crash)
+            ---------------------------------------------------- */
+            composable("reelCapture") {
+                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
+                    title = "Record (Camera)",
+                    onDone = { navController.popBackStack() }
+                )
+            }
+
+            composable("reelGalleryPick") {
+                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
+                    title = "Pick from Gallery",
+                    onDone = { navController.popBackStack() }
+                )
+            }
+
+            composable("reelYoutube") {
+                com.girlspace.app.ui.reels.ReelsCreateStubRoute(
+                    title = "Add YouTube URL",
+                    onDone = { navController.popBackStack() }
+                )
+            }
+            composable("reelCapture") {
+                ReelCaptureScreen(onBack = { navController.popBackStack() })
+            }
+
+            composable("reelGalleryPick") {
+                ReelGalleryPickScreen(
+                    navController = navController,
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable("reelYoutube") {
+                ReelYoutubeScreen(onBack = { navController.popBackStack() })
+            }
+
+            composable(
+                route = "reelCreate/{videoUri}",
+                arguments = listOf(navArgument("videoUri") { type = NavType.StringType })
+            ) { backStackEntry ->
+                val videoUri = backStackEntry.arguments?.getString("videoUri") ?: return@composable
+                ReelCreateFromGalleryScreen(
+                    videoUriString = videoUri,
+                    onBack = { navController.popBackStack() },
+                    onCreated = { reelId ->
+                        // After upload → open viewer on the new reel
+                        navController.navigate("reelsViewer/$reelId") {
+                            launchSingleTop = true
+                        }
+                    }
+                )
+            }
+
 
             /* ---------------------------------------------------
                 10) 1-1 CHAT BY THREAD ID

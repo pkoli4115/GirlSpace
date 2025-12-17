@@ -1,6 +1,7 @@
 package com.girlspace.app
 
 import android.Manifest
+import android.net.Uri
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -52,7 +53,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         // ✅ Handle notification tap (cold start)
+// ✅ Handle notification tap (cold start)
         handleNotificationIntent(intent)
+
+// ✅ Handle share-in (cold start)
+        handleIncomingShareIntent(intent)
 
         // ✅ Step 1 bootstrap
         NotificationBootstrapper.bootstrap(applicationContext)
@@ -82,6 +87,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleNotificationIntent(intent)
+        handleIncomingShareIntent(intent)
     }
 
     private fun handleNotificationIntent(intent: Intent?) {
@@ -89,6 +95,61 @@ class MainActivity : ComponentActivity() {
         if (!threadId.isNullOrBlank()) {
             DeepLinkStore.openChat(threadId)
         }
+    }
+    private fun handleIncomingShareIntent(intent: Intent?) {
+        if (intent == null) return
+
+        val action = intent.action ?: return
+        val type = intent.type
+
+        when (action) {
+            Intent.ACTION_SEND -> {
+                // TEXT / URL share
+                if (type == "text/plain") {
+                    val sharedText = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
+                    if (!sharedText.isNullOrBlank()) {
+                        DeepLinkStore.setSharedText(sharedText)
+                    }
+                }
+
+                // VIDEO share (single)
+                if (type?.startsWith("video/") == true) {
+                    val uri = if (Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+                    }
+
+                    if (uri != null) {
+                        DeepLinkStore.setSharedVideoUri(uri.toString())
+                    }
+                }
+            }
+
+            Intent.ACTION_SEND_MULTIPLE -> {
+                // MULTIPLE videos (take first for now)
+                if (type?.startsWith("video/") == true) {
+                    val uris = if (Build.VERSION.SDK_INT >= 33) {
+                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+                    }
+
+                    val first = uris?.firstOrNull()
+                    if (first != null) {
+                        DeepLinkStore.setSharedVideoUri(first.toString())
+                    }
+                }
+            }
+        }
+
+        // ✅ Prevent re-processing if activity recreates
+        intent.action = null
+        intent.type = null
+        intent.removeExtra(Intent.EXTRA_TEXT)
+        intent.removeExtra(Intent.EXTRA_STREAM)
     }
 
     private fun ensureNotificationPermission() {

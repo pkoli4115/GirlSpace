@@ -404,7 +404,7 @@ fun FeedScreen(
                                             .height(220.dp)
                                             .clickable {
                                                 // open reels viewer starting from this reel
-                                                navController.navigate("reelsViewer/${r.key}")
+                                                navController.navigate("reelsViewer/${r.id}")
                                             },
                                         shape = RoundedCornerShape(18.dp),
                                         elevation = CardDefaults.cardElevation(4.dp)
@@ -563,10 +563,10 @@ fun FeedScreen(
                                         if (activeVideoPostId == postId) activeVideoPostId = null
                                         videoVm.stop(postId)
                                     },
-                                    onOpenReelsViewer = { startPostId ->
-                                        // ✅ you confirmed route: reelsViewer/{startPostId}
-                                        navController.navigate("reelsViewer/$startPostId")
-                                    },
+                                    onOpenReelsViewer = { reelId ->
+                                        navController.navigate("reelsViewer/$reelId")
+                                    }
+                                    ,
                                     feedVibe = feedVibe
                                 )
                             }
@@ -575,8 +575,8 @@ fun FeedScreen(
                                 ReelCard(
                                     reel = item,
                                     vibe = feedVibe,
-                                    onOpenReel = { reelKey ->
-                                        navController.navigate("reelsViewer/$reelKey")
+                                    onOpenReel = { reelId ->
+                                        navController.navigate("reelsViewer/$reelId")
                                     }
                                 )
                             }

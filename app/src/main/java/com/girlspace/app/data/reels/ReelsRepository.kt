@@ -226,7 +226,6 @@ class ReelsRepository @Inject constructor() {
             try { r.release() } catch (_: Throwable) {}
         }
     }
-
     suspend fun uploadReel(
         context: Context,
         videoUri: Uri,
@@ -238,9 +237,11 @@ class ReelsRepository @Inject constructor() {
         val authorName = auth.currentUser?.displayName ?: "User"
 
         val info = readVideoInfo(context, videoUri)
-        if (info.durationSec !in 20..60) throw IllegalArgumentException("Reels must be 20–60 seconds.")
-        // You asked vertical-only for seeded; for user uploads we allow but can enforce:
-        // if (info.height <= info.width) throw IllegalArgumentException("Please upload a vertical video.")
+
+        // ✅ Locked rules
+        if (info.durationSec !in 20..180) {
+            throw IllegalArgumentException("Video must be between 20 and 180 seconds.")
+        }
 
         val reelId = UUID.randomUUID().toString()
         val videoRef = storage.reference.child("reels/$uid/$reelId.mp4")
@@ -257,20 +258,25 @@ class ReelsRepository @Inject constructor() {
 
         // create doc
         val docRef = reelsCol.document(reelId)
-        docRef.set(mapOf(
-            "videoUrl" to videoUrl,
-            "thumbnailUrl" to thumbUrl,
-            "durationSec" to info.durationSec,
-            "caption" to caption,
-            "authorId" to uid,
-            "authorName" to authorName,
-            "visibility" to visibility,
-            "tags" to tags,
-            "createdAt" to FieldValue.serverTimestamp(),
-            "source" to mapOf("provider" to "user_upload"),
-            "metrics" to mapOf("views" to 0, "likes" to 0, "shares" to 0)
-        )).await()
+        docRef.set(
+            mapOf(
+                "videoUrl" to videoUrl,
+                "thumbnailUrl" to thumbUrl,
+                "durationSec" to info.durationSec,
+                "caption" to caption,
+                "authorId" to uid,
+                "authorName" to authorName,
+                "visibility" to visibility,
+                "tags" to tags,
+                "createdAt" to FieldValue.serverTimestamp(),
+
+                // ✅ keep your existing model contract
+                "source" to mapOf("provider" to "user_upload"),
+                "metrics" to mapOf("views" to 0, "likes" to 0, "shares" to 0)
+            )
+        ).await()
 
         return reelId
     }
+
 }
