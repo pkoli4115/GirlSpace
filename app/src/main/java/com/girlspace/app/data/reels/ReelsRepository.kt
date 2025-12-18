@@ -443,9 +443,10 @@ class ReelsRepository @Inject constructor() {
         val info = readVideoInfo(context, videoUri)
 
         // ✅ Locked rules
-        if (info.durationSec !in 20..180) {
-            throw IllegalArgumentException("Video must be between 20 and 180 seconds.")
+        if (info.durationSec !in 2..180) {
+            throw IllegalArgumentException("Video must be between 2 and 180 seconds.")
         }
+
 
         val reelId = UUID.randomUUID().toString()
         val videoRef = storage.reference.child("reels/$uid/$reelId.mp4")

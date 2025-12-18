@@ -1,7 +1,15 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package com.girlspace.app.ui.reels
-
+import androidx.media3.common.Player
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.media3.common.util.Log
+import kotlinx.coroutines.flow.collect
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
@@ -61,6 +69,9 @@ fun ReelsViewerScreen(
     val commentsLoading by vm.commentsLoading.collectAsState()
     val commentsCanLoadMore by vm.commentsCanLoadMore.collectAsState()
     val commentsForReelId by vm.commentsForReelId.collectAsState()
+    val hasFirstFrame by videoVm.hasFirstFrame.collectAsState()
+    val isBuffering by videoVm.isBuffering.collectAsState()
+    val firstFramePostId by videoVm.firstFramePostId.collectAsState()
 
     val context = LocalContext.current
     val view = LocalView.current
@@ -148,11 +159,82 @@ fun ReelsViewerScreen(
         val startIndex = remember(reels, startReelId) {
             reels.indexOfFirst { it.id == startReelId }.coerceAtLeast(0)
         }
+        var suppressAutoAdvanceUntilMs by remember { mutableStateOf(0L) }
 
         val pagerState = rememberPagerState(
             initialPage = startIndex,
             pageCount = { reels.size }
         )
+        // ✅ Auto-advance to next reel when video ends
+        val autoAdvanceScope = rememberCoroutineScope()
+
+        DisposableEffect(videoVm.player) {
+            val listener = object : Player.Listener {
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_ENDED) {
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now < suppressAutoAdvanceUntilMs) return
+
+                        autoAdvanceScope.launch {
+                            val nextPage = pagerState.currentPage + 1
+                            if (nextPage < pagerState.pageCount) {
+                                pagerState.animateScrollToPage(nextPage)
+                            }
+                        }
+                    }
+
+                }
+            }
+
+            videoVm.player.addListener(listener)
+
+            onDispose {
+                videoVm.player.removeListener(listener)
+            }
+        }
+
+        // keep latest reels without restarting the effect
+        val reelsLatest by rememberUpdatedState(newValue = reels)
+
+        LaunchedEffect(pagerState) {
+            snapshotFlow { pagerState.currentPage }
+                .distinctUntilChanged()
+                .collectLatest { page ->
+                    val currentList = reelsLatest
+                    val reel = currentList.getOrNull(page) ?: return@collectLatest
+                    suppressAutoAdvanceUntilMs = android.os.SystemClock.elapsedRealtime() + 900L
+
+                    // ✅ NEW: instantly hide old frame when page changes
+                    videoVm.onPageSelectedPending()
+
+                    // ✅ debounce (keep your delay if you already added it)
+                    delay(300)
+
+                    val provider = (reel.source["provider"] as? String).orEmpty()
+                    Log.d("REELS_DEBUG", "PAGE_CHANGED page=$page reelId=${reel.id} provider=$provider")
+
+                    vm.onReelViewed(reel.id)
+
+                    if (provider.equals("youtube_url", ignoreCase = true)) {
+                        videoVm.pauseActive()
+                    } else {
+                        val url = reel.videoUrl
+                        if (url.isNotBlank()) {
+                            videoVm.requestPlay(reel.id, url, autoplay = true)
+                        } else {
+                            videoVm.pauseActive()
+                        }
+                    }
+
+                    val nextUrl = currentList.getOrNull(page + 1)?.videoUrl
+                    val prevUrl = currentList.getOrNull(page - 1)?.videoUrl
+                    videoVm.setNeighbors(next = nextUrl, prev = prevUrl)
+                }
+        }
+
+
+
+
 
         VerticalPager(
             state = pagerState,
@@ -162,35 +244,78 @@ fun ReelsViewerScreen(
             val provider = (reel.source["provider"] as? String).orEmpty()
             val isPageActive = pagerState.currentPage == page
 
-            LaunchedEffect(isPageActive, reel.id, provider, reel.videoUrl) {
-                if (!isPageActive) return@LaunchedEffect
-                vm.onReelViewed(reel.id)
+            // ✅ Wrap page UI in Box so overlay can be aligned "inside same Box as player"
+            Box(Modifier.fillMaxSize()) {
 
-                if (provider.equals("youtube_url", ignoreCase = true)) {
-                    videoVm.pauseActive()
-                } else {
-                    val url = reel.videoUrl
-                    if (url.isNotBlank()) {
-                        videoVm.requestPlay(reel.id, url, autoplay = true)
-                    } else {
-                        videoVm.pauseActive()
+                    if (isPageActive) {
+                    SharedPlayerView(
+                        player = videoVm.player,
+                        modifier = Modifier.fillMaxSize(),
+                        showController = false,
+                        resizeMode = resizeMode
+                    )
+                }
+
+// ✅ Keep showing thumb until player renders first frame for the ACTIVE page
+                val activePostId by videoVm.activePostId.collectAsState()
+
+// Show thumb if this page is active BUT player is not yet switched to this reel,
+// OR player hasn't rendered first frame for the current reel yet.
+                val shouldShowThumb = isPageActive && (firstFramePostId != reel.id)
+                if (shouldShowThumb) {
+                    androidx.compose.foundation.Image(
+                        painter = coil.compose.rememberAsyncImagePainter(reel.thumbnailUrl),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                    )
+
+                    // Optional: tiny loader (only for active page)
+                    if (isBuffering) {
+                        CircularProgressIndicator(
+                            modifier = Modifier
+                                .align(Alignment.Center),
+                            color = Color.White
+                        )
                     }
                 }
-            }
 
-            SharedPlayerView(
-                player = videoVm.player,
-                modifier = Modifier.fillMaxSize(),
-                showController = false,
-                resizeMode = resizeMode
-            )
-
-            if (provider.equals("youtube_url", ignoreCase = true)) {
-                YoutubeLinkOutOverlay(reel = reel)
+                // ✅ Overlay: author + caption (correct scope, no "reel" unresolved)
+                if (isPageActive) {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(16.dp)
+                            .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                            .fillMaxWidth(0.85f)
+                    ) {
+                        Text(
+                            text = reel.authorName.ifBlank { "User" },
+                            color = Color.White,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (reel.caption.isNotBlank()) {
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                text = reel.caption,
+                                color = Color.White,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+                if (provider.equals("youtube_url", ignoreCase = true)) {
+                    YoutubeLinkOutOverlay(reel = reel)
+                }
             }
         }
 
         val currentReel = reels.getOrNull(pagerState.currentPage)
+
 
         // Top: back + fit/fill
         TopBackBar(
@@ -360,6 +485,7 @@ private fun TopBackBar(
     }
 }
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 private fun ReelsPlaybackControls(
     modifier: Modifier,

@@ -16,7 +16,7 @@ fun SharedPlayerView(
     player: Player,
     modifier: Modifier = Modifier,
     showController: Boolean = false,
-    resizeMode: Int = AspectRatioFrameLayout.RESIZE_MODE_ZOOM, // default = fill/crop
+    resizeMode: Int = AspectRatioFrameLayout.RESIZE_MODE_ZOOM,
     playerViewFactory: (android.content.Context) -> PlayerView = { ctx ->
         PlayerView(ctx).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -25,6 +25,12 @@ fun SharedPlayerView(
             )
             useController = showController
             this.resizeMode = resizeMode
+
+            // Prevent black shutter flash
+            setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
+
+            // ✅ Use setter method if your Media3 has it (most do)
+            runCatching { setKeepContentOnPlayerReset(true) }
         }
     }
 ) {
@@ -38,7 +44,6 @@ fun SharedPlayerView(
             }
         },
         update = { pv ->
-            // ✅ keep the same player instance
             if (pv.player !== player) pv.player = player
             pv.useController = showController
             pv.resizeMode = resizeMode

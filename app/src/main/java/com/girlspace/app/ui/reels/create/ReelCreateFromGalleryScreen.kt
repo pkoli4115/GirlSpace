@@ -213,7 +213,16 @@ fun ReelCreateFromGalleryScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            val canSubmit = (dur != null && dur in 20..180) && !vm.isBusy
+            val captionOk = caption.text.trim().isNotBlank()
+            if (!captionOk) {
+                Text(
+                    text = "Caption is required.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+
+            val canSubmit = (dur != null && dur in 2..180) && captionOk && !vm.isBusy
             Button(
                 onClick = {
                     vm.uploadWithProgress(
