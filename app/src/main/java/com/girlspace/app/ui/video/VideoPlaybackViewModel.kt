@@ -283,6 +283,12 @@ class VideoPlaybackViewModel @Inject constructor(
         player.volume = if (_muted.value) 0f else 1f
     }
 
+    fun clearBufferingUiForYoutube(postId: String) {
+        _activePostId.value = postId
+        _isBuffering.value = false
+        _hasFirstFrame.value = true
+        _firstFramePostId.value = postId
+    }
     override fun onCleared() {
         try {
             nextPrefetch?.cancel?.invoke()

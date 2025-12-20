@@ -449,17 +449,26 @@ private fun NotificationBell(
                     // - isRead:Boolean (common variant)
                     // - missing field => treat as unread (so it still shows in badge)
                     unreadCount = docs.count { d ->
-                        val read = d.getBoolean("read")
-                        val isRead = d.getBoolean("isRead")
-                        val isSeen = d.getBoolean("seen")
+                        // ✅ Count ONLY reel-related notifications
+                        val category = (d.getString("category") ?: "").trim().uppercase()
+                        val type = (d.getString("type") ?: "").trim().lowercase()
+                        val deepLink = (d.getString("deepLink") ?: "").trim().lowercase()
 
+                        val isReelNotif =
+                            category == "REEL" ||
+                                    type.startsWith("reel_") ||
+                                    deepLink.startsWith("togetherly://reels/")
+
+                        if (!isReelNotif) return@count false
+
+                        // unread = read == false (missing treated as unread, safe for badge)
+                        val read = d.getBoolean("read")
                         when {
                             read != null -> read == false
-                            isRead != null -> isRead == false
-                            isSeen != null -> isSeen == false
-                            else -> true // no flag -> consider unread (safer for badge)
+                            else -> true
                         }
                     }
+
                 }
 
             onDispose { reg.remove() }

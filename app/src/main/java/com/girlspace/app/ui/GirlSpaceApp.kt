@@ -1,4 +1,5 @@
 package com.girlspace.app.ui
+
 import com.girlspace.app.ui.reels.create.ReelCaptureScreen
 import com.girlspace.app.ui.reels.create.ReelGalleryPickScreen
 import com.girlspace.app.ui.reels.create.ReelYoutubeScreen
@@ -49,7 +50,6 @@ fun GirlSpaceApp() {
         val sharedText by DeepLinkStore.sharedText.collectAsState()
         val sharedVideoUri by DeepLinkStore.sharedVideoUri.collectAsState()
 
-
         // Deep link handling
         LaunchedEffect(openThreadId) {
             val tid = openThreadId
@@ -57,19 +57,19 @@ fun GirlSpaceApp() {
                 navController.navigate("chat/$tid") { launchSingleTop = true }
                 DeepLinkStore.clearChat()
             }
-
         }
-// ✅ Share: text/link → open YouTube/link import screen
+
+        // ✅ Share: text/link → open YouTube/link import screen (prefilled)
         LaunchedEffect(sharedText) {
             val text = sharedText
             if (!text.isNullOrBlank()) {
-                navController.navigate("reelYoutube") { launchSingleTop = true }
-                // The screen will read DeepLinkStore.sharedText (next step if needed)
+                val encoded = Uri.encode(text)
+                navController.navigate("reelYoutube/$encoded") { launchSingleTop = true }
                 DeepLinkStore.clearSharedText()
             }
         }
 
-// ✅ Share: video uri → open gallery upload screen with prefilled uri
+        // ✅ Share: video uri → open gallery upload screen with prefilled uri
         LaunchedEffect(sharedVideoUri) {
             val uriStr = sharedVideoUri
             if (!uriStr.isNullOrBlank()) {
@@ -78,7 +78,6 @@ fun GirlSpaceApp() {
                 DeepLinkStore.clearSharedVideoUri()
             }
         }
-
 
         NavHost(
             navController = navController,
@@ -169,11 +168,20 @@ fun GirlSpaceApp() {
                 NotificationsScreen(
                     onBack = { navController.popBackStack() },
                     onNavigate = { deepLink ->
-                        if (deepLink.startsWith("togetherly://chat/")) {
-                            val threadId = deepLink.substringAfterLast("/")
-                            navController.navigate("chat/$threadId")
+                        when {
+                            deepLink.startsWith("togetherly://chat/") -> {
+                                val threadId = deepLink.substringAfterLast("/")
+                                navController.navigate("chat/$threadId")
+                            }
+
+                            deepLink.startsWith("togetherly://reels/") -> {
+                                val reelId = deepLink.substringAfterLast("/")
+                                navController.navigate("reelsViewer/$reelId")
+                            }
                         }
                     }
+
+
                 )
             }
 
@@ -370,6 +378,7 @@ fun GirlSpaceApp() {
                     )
                 }
             }
+
             composable(
                 route = "reelsViewer/{startReelId}",
                 arguments = listOf(navArgument("startReelId") { type = NavType.StringType })
@@ -382,7 +391,7 @@ fun GirlSpaceApp() {
                 )
             }
 
-                composable("reelCapture") {
+            composable("reelCapture") {
                 ReelCaptureScreen(onBack = { navController.popBackStack() })
             }
 
@@ -393,28 +402,43 @@ fun GirlSpaceApp() {
                 )
             }
 
+            // ✅ Existing route still works (no args)
             composable("reelYoutube") {
-                ReelYoutubeScreen(onBack = { navController.popBackStack() })
+                ReelYoutubeScreen(
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            // ✅ New route: prefilled text (shared link)
+            composable(
+                route = "reelYoutube/{prefill}",
+                arguments = listOf(navArgument("prefill") { type = NavType.StringType })
+            ) { backStackEntry ->
+                val prefill = backStackEntry.arguments?.getString("prefill")?.let { Uri.decode(it) }
+                ReelYoutubeScreen(
+                    onBack = { navController.popBackStack() },
+                    prefillUrl = prefill
+                )
             }
 
             composable(
                 route = "reelCreate/{videoUri}",
                 arguments = listOf(navArgument("videoUri") { type = NavType.StringType })
             ) { backStackEntry ->
-                val videoUri = backStackEntry.arguments?.getString("videoUri") ?: return@composable
+                val videoUriEncoded = backStackEntry.arguments?.getString("videoUri") ?: return@composable
+                val videoUriDecoded = Uri.decode(videoUriEncoded)
+
                 ReelCreateFromGalleryScreen(
-                    videoUriString = videoUri,
+                    videoUriString = videoUriDecoded,
                     onBack = { navController.popBackStack() },
                     onCreated = { reelId ->
                         navController.navigate("reelsViewer/$reelId") {
                             launchSingleTop = true
-                            popUpTo("reelGalleryPick") { inclusive = true } // removes picker + create screens
+                            popUpTo("reelGalleryPick") { inclusive = true }
                         }
                     }
-
                 )
             }
-
 
             /* ---------------------------------------------------
                 10) 1-1 CHAT BY THREAD ID

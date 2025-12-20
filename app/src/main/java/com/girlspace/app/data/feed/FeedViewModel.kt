@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.feed
+import kotlinx.coroutines.flow.asStateFlow
 
 import com.girlspace.app.ads.AdConfig
 import com.girlspace.app.ads.NativeAdLoader
@@ -46,6 +47,8 @@ class FeedViewModel : ViewModel() {
     val adsReady: StateFlow<Boolean> = _adsReady
 
     private var isAdLoading = false
+    private val _hiddenTargetIds = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenTargetIds: StateFlow<Set<String>> = _hiddenTargetIds.asStateFlow()
 
     // Mixed feed items (posts + reels + ads + top picks + evergreen)
     private val _feedItems = MutableStateFlow<List<FeedItem>>(emptyList())
@@ -84,32 +87,10 @@ class FeedViewModel : ViewModel() {
 
     init {
         Log.e("FEED_RELEASE", "FeedViewModel initialized – calling refresh()")
-        fun refresh() {
-            Log.e("FEED_RELEASE", "refresh() started")
-
-            viewModelScope.launch {
-                _isInitialLoading.value = true
-                _hasMore.value = true
-                engine.resetPagination()
-
-                try {
-                    val items = engine.loadInitialPage()
-                    Log.e("FEED_RELEASE", "refresh() success, items=${items.size}")
-                    applyNewFeedItems(injectAds(items))
-                } catch (e: Exception) {
-                    Log.e("FEED_RELEASE", "refresh() failed", e)
-                    _errorMessage.value = e.localizedMessage ?: "Failed to load feed"
-                    _feedItems.value = emptyList()
-                    _posts.value = emptyList()
-
-                } finally {
-                    _isInitialLoading.value = false
-                }
-            }
-        }
-
+        listenHiddenContent()
         refresh()
     }
+
 
 
     // ------------------------------------------------------------------------
@@ -131,6 +112,40 @@ class FeedViewModel : ViewModel() {
                 _posts.value = emptyList()
             } finally {
                 _isInitialLoading.value = false
+            }
+        }
+    }
+    private fun listenHiddenContent() {
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+
+        FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(uid)
+            .collection("hiddenContent")
+            .addSnapshotListener { snap, _ ->
+                val ids = snap?.documents
+                    ?.mapNotNull { it.getString("targetId") }
+                    ?.toSet()
+                    ?: emptySet()
+
+                _hiddenTargetIds.value = ids
+                // ✅ re-apply filter to current feed immediately
+                _feedItems.value = filterHidden(_feedItems.value)
+                _posts.value = _feedItems.value
+                    .filterIsInstance<FeedItem.PostItem>()
+                    .map { it.post }
+
+            }
+    }
+    private fun filterHidden(items: List<FeedItem>): List<FeedItem> {
+        val hidden = _hiddenTargetIds.value
+        if (hidden.isEmpty()) return items
+
+        return items.filterNot { item ->
+            when (item) {
+                is FeedItem.PostItem -> hidden.contains(item.post.postId)
+                is FeedItem.ReelItem -> hidden.contains(item.id)
+                else -> false
             }
         }
     }
@@ -164,11 +179,13 @@ class FeedViewModel : ViewModel() {
     }
 
     private fun applyNewFeedItems(items: List<FeedItem>) {
-        _feedItems.value = items
-        _posts.value = items
+        val filtered = filterHidden(items)
+        _feedItems.value = filtered
+        _posts.value = filtered
             .filterIsInstance<FeedItem.PostItem>()
             .map { it.post }
     }
+
 // ------------------------------------------------------------------------
 // ADS (Native AdMob) - Load + Inject
 // ------------------------------------------------------------------------

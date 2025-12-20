@@ -27,6 +27,9 @@ import java.io.ByteArrayOutputStream
 import java.util.UUID
 import javax.inject.Inject
 import javax.inject.Singleton
+import com.google.firebase.FirebaseException
+import com.google.firebase.firestore.DocumentReference
+import com.google.firebase.firestore.WriteBatch
 
 @Singleton
 class ReelsRepository @Inject constructor() {
@@ -52,7 +55,67 @@ class ReelsRepository @Inject constructor() {
 
     suspend fun getReelById(reelId: String): Reel? {
         val doc = reelsCol.document(reelId).get().await()
-        return doc.toObject(Reel::class.java)?.copy(id = doc.id)
+        return doc.toObject(Reel::class.java)?.copy(docId = doc.id)
+    }
+    /**
+     * Delete a reel owned by the current user.
+     * Deletes:
+     * - subcollections: comments, likes, shares (best effort)
+     * - firestore doc
+     * - storage files: reels/{authorId}/{reelId}.mp4 and .jpg (best effort)
+     */
+    suspend fun deleteReel(reelId: String) {
+        val uid = auth.currentUser?.uid ?: throw IllegalStateException("Not logged in")
+
+        val reelRef = reelsCol.document(reelId)
+        val snap = reelRef.get().await()
+        if (!snap.exists()) return
+
+        val authorId = snap.getString("authorId") ?: ""
+        if (authorId != uid) {
+            throw SecurityException("You can delete only your own reels.")
+        }
+
+        // 1) Delete subcollections (best effort)
+        runCatching { deleteSubcollection(reelRef, "comments") }
+        runCatching { deleteSubcollection(reelRef, "likes") }
+        runCatching { deleteSubcollection(reelRef, "shares") }
+
+        // 2) Delete Firestore doc
+        reelRef.delete().await()
+
+        // 3) Delete storage objects (best effort)
+        // We know exact paths because upload uses reels/$uid/$reelId.mp4 and .jpg
+        val videoPath = "reels/$uid/$reelId.mp4"
+        val thumbPath = "reels/$uid/$reelId.jpg"
+
+        runCatching { storage.reference.child(videoPath).delete().await() }
+        runCatching { storage.reference.child(thumbPath).delete().await() }
+    }
+
+    /**
+     * Deletes a subcollection in batches to avoid limits.
+     * Firestore client doesn't do recursive delete, so we page and batch-delete.
+     */
+    private suspend fun deleteSubcollection(
+        parent: DocumentReference,
+        subcollection: String,
+        batchSize: Int = 100
+    ) {
+        while (true) {
+            val snap = parent.collection(subcollection)
+                .limit(batchSize.toLong())
+                .get()
+                .await()
+
+            if (snap.isEmpty) break
+
+            firestore.runBatch { batch: WriteBatch ->
+                snap.documents.forEach { batch.delete(it.reference) }
+            }.await()
+
+            // loop until empty
+        }
     }
 
     suspend fun incrementView(reelId: String) {
@@ -81,7 +144,7 @@ class ReelsRepository @Inject constructor() {
         }
 
         val snap = q.get().await()
-        val reels = snap.documents.mapNotNull { it.toObject(Reel::class.java)?.copy(id = it.id) }
+        val reels = snap.documents.mapNotNull { it.toObject(Reel::class.java)?.copy(docId = it.id) }
 
         val last = snap.documents.lastOrNull()
         val lastCreated = last?.getTimestamp("createdAt")
@@ -120,7 +183,7 @@ class ReelsRepository @Inject constructor() {
             .limit(limit)
             .get().await()
 
-        return snap.documents.mapNotNull { it.toObject(Reel::class.java)?.copy(id = it.id) }
+        return snap.documents.mapNotNull { it.toObject(Reel::class.java)?.copy(docId = it.id) }
     }
 
     // ---------- Likes ----------

@@ -5,13 +5,15 @@ import androidx.lifecycle.viewModelScope
 import com.girlspace.app.data.reels.Reel
 import com.girlspace.app.data.reels.ReelComment
 import com.girlspace.app.data.reels.ReelsRepository
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FirebaseFirestore
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
-
+import kotlinx.coroutines.flow.asStateFlow
 @HiltViewModel
 class ReelsViewModel @Inject constructor(
     private val repo: ReelsRepository
@@ -22,6 +24,8 @@ class ReelsViewModel @Inject constructor(
     // -------------------------
     private val _reels = MutableStateFlow<List<Reel>>(emptyList())
     val reels: StateFlow<List<Reel>> = _reels
+    private val _hiddenTargetIds = MutableStateFlow<Set<String>>(emptySet())
+    val hiddenTargetIds: StateFlow<Set<String>> = _hiddenTargetIds.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
@@ -63,6 +67,10 @@ class ReelsViewModel @Inject constructor(
             runCatching { repo.logShare(reelId) }
         }
     }
+    init {
+        listenHiddenContent()
+        loadInitial()
+    }
 
     // -------------------------
     // Public API
@@ -72,6 +80,23 @@ class ReelsViewModel @Inject constructor(
         if (!force && _reels.value.isNotEmpty()) return
         resetPaging()
         loadNext()
+    }
+    fun deleteReel(reel: Reel, onError: (String) -> Unit = {}) {
+        val reelId = reel.id
+
+        // Optimistic UI remove
+        val before = _reels.value
+        _reels.update { list -> list.filterNot { it.id == reelId } }
+
+        viewModelScope.launch {
+            try {
+                repo.deleteReel(reelId)
+            } catch (t: Throwable) {
+                // rollback on failure
+                _reels.value = before
+                onError(t.message ?: "Failed to delete reel")
+            }
+        }
     }
 
 
@@ -88,7 +113,10 @@ class ReelsViewModel @Inject constructor(
                 )
 
                 val merged = (_reels.value + page.items).distinctBy { it.id }
-                _reels.value = merged
+
+// ✅ filter hidden targets (reels reported/hidden by this user)
+                val hidden = _hiddenTargetIds.value
+                _reels.value = if (hidden.isEmpty()) merged else merged.filterNot { hidden.contains(it.id) }
 
                 // ✅ hydrate liked state so viewer/grid shows correct icon immediately
                 if (page.likedByMeIds.isNotEmpty()) {
@@ -132,13 +160,19 @@ class ReelsViewModel @Inject constructor(
     fun ensureReelInList(reelId: String) {
         if (_reels.value.any { it.id == reelId }) return
 
+        // ✅ don’t re-add if user already hid it
+        if (_hiddenTargetIds.value.contains(reelId)) return
+
         viewModelScope.launch {
             val reel = repo.getReelById(reelId) ?: return@launch
+            if (_hiddenTargetIds.value.contains(reel.id)) return@launch
+
             _reels.update { list ->
                 listOf(reel) + list.filterNot { it.id == reelId }
             }
         }
     }
+
 
     fun isLiked(reelId: String): Boolean = _likedByMe.value.contains(reelId)
 
@@ -258,6 +292,28 @@ class ReelsViewModel @Inject constructor(
                 }
             }
         }
+    }
+    private fun listenHiddenContent() {
+        val uid = FirebaseAuth.getInstance().currentUser?.uid ?: return
+
+        FirebaseFirestore.getInstance()
+            .collection("users")
+            .document(uid)
+            .collection("hiddenContent")
+            .addSnapshotListener { snap, _ ->
+                val ids = snap?.documents
+                    ?.mapNotNull { it.getString("targetId") }
+                    ?.toSet()
+                    ?: emptySet()
+
+                _hiddenTargetIds.value = ids
+
+                // ✅ live-filter current list (so it disappears immediately)
+                val current = _reels.value
+                if (current.isNotEmpty() && ids.isNotEmpty()) {
+                    _reels.value = current.filterNot { ids.contains(it.id) }
+                }
+            }
     }
 }
 

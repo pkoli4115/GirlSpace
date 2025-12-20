@@ -1,5 +1,10 @@
 package com.girlspace.app.ui.feed
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.RadioButton
+import com.girlspace.app.ui.reels.ReportReason
+import androidx.compose.ui.text.input.TextFieldValue
+import java.util.UUID
 import kotlinx.coroutines.delay
 import androidx.compose.runtime.collectAsState
 import com.girlspace.app.ui.feed.InlineVideoPlayer
@@ -85,6 +90,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.media3.common.util.UnstableApi
 import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
 import com.girlspace.app.core.plan.PlanLimitsRepository
@@ -101,6 +107,7 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Locale
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun FeedScreen(
     isCreatePostOpen: Boolean,
@@ -115,6 +122,7 @@ fun FeedScreen(
     val isInitialLoading by vm.isInitialLoading.collectAsState()
     val isPaging by vm.isPaging.collectAsState()
     val errorMessage by vm.errorMessage.collectAsState()
+    val hiddenTargetIds by vm.hiddenTargetIds.collectAsState()
 
     LaunchedEffect(Unit) {
         Log.e("FEED_RELEASE", "FeedScreen entered (LaunchedEffect)")
@@ -326,6 +334,12 @@ fun FeedScreen(
                 }
             }
     }
+// 🔒 hide reported content for THIS user only
+    val visibleFeedItems = remember(feedItems, hiddenTargetIds) {
+        feedItems.filterNot { item ->
+            item is FeedItem.PostItem && hiddenTargetIds.contains(item.post.postId)
+        }
+    }
 
     var mediaViewerState by remember { mutableStateOf<MediaViewerState?>(null) }
 
@@ -453,7 +467,7 @@ fun FeedScreen(
 
 
                     itemsIndexed(
-                        items = feedItems,
+                        items = visibleFeedItems,
                         key = { index, item ->
                             when (item) {
                                 is FeedItem.TopPicks -> "top_picks_$index"
@@ -1037,6 +1051,7 @@ fun ErrorRow(message: String) {
 
    ========================================================================== */
 
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun PostCard(
     post: Post,
@@ -1063,6 +1078,7 @@ fun PostCard(
     val context = LocalContext.current
     val isMuted by videoVm.muted.collectAsState()
     val firestore = remember { FirebaseFirestore.getInstance() }
+    var showReportPost by remember(post.postId) { mutableStateOf(false) }
 
     val sdf = remember { SimpleDateFormat("MMM d • h:mm a", Locale.getDefault()) }
     val dateText = remember(post.createdAt) { post.createdAt?.toDate()?.let { sdf.format(it) } ?: "" }
@@ -1185,9 +1201,10 @@ fun PostCard(
                             text = { Text("Report") },
                             onClick = {
                                 showMoreMenu = false
-                                Toast.makeText(context, "Thanks, we’ve received your report.", Toast.LENGTH_SHORT).show()
+                                showReportPost = true
                             }
                         )
+
                     }
                 }
             }
@@ -1482,6 +1499,18 @@ fun PostCard(
             }
         }
     }
+    if (showReportPost) {
+        ReportPostDialog(
+            postId = post.postId,
+            postOwnerId = post.uid,
+            onDismiss = { showReportPost = false },
+            onSubmitted = {
+                showReportPost = false
+                Toast.makeText(context, "Thanks — report submitted.", Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
 }
 
 @Composable
@@ -1686,4 +1715,130 @@ private fun NewPostsBadge(
             )
         }
     }
+}
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReportPostDialog(
+    postId: String,
+    postOwnerId: String,
+    onDismiss: () -> Unit,
+    onSubmitted: () -> Unit
+) {
+    val uid = remember { FirebaseAuth.getInstance().currentUser?.uid }
+    val firestore = remember { FirebaseFirestore.getInstance() }
+
+    var selected by remember { mutableStateOf(ReportReason.SPAM) }
+    var note by remember { mutableStateOf(TextFieldValue("")) }
+    var submitting by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = { if (!submitting) onDismiss() },
+        title = { Text("Report Post") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+
+                Text("Select a reason:", style = MaterialTheme.typography.bodyMedium)
+
+                ReportReason.values().forEach { r ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(enabled = !submitting) { selected = r }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = (selected == r),
+                            onClick = { if (!submitting) selected = r }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(r.label)
+                    }
+                }
+
+                OutlinedTextField(
+                    value = note,
+                    onValueChange = { note = it },
+                    enabled = !submitting,
+                    label = { Text("Note (optional)") },
+                    maxLines = 3,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !submitting,
+                onClick = {
+                    if (uid.isNullOrBlank()) {
+                        error = "Please sign in to report."
+                        return@TextButton
+                    }
+                    if (postId.isBlank() || postOwnerId.isBlank()) {
+                        error = "Invalid post."
+                        return@TextButton
+                    }
+
+                    submitting = true
+                    error = null
+
+                    val reportId = UUID.randomUUID().toString()
+                    val data = hashMapOf(
+                        "type" to "POST",
+                        "postId" to postId,
+                        "targetId" to postId,
+                        "reporterUserId" to uid,
+                        "reportedUserId" to postOwnerId,
+                        "reason" to selected.wire,
+                        "note" to note.text.trim().takeIf { it.isNotBlank() },
+                        "createdAt" to FieldValue.serverTimestamp(),
+                        "status" to "OPEN"
+                    )
+
+                    if (data["note"] == null) data.remove("note")
+
+                    firestore.collection("reports")
+                        .document(reportId)
+                        .set(data)
+                        .addOnSuccessListener {
+                            // ✅ hide for reporting user only (wait for completion)
+                            firestore.collection("users")
+                                .document(uid)
+                                .collection("hiddenContent")
+                                .document(postId)
+                                .set(
+                                    mapOf(
+                                        "targetId" to postId,
+                                        "type" to "POST",
+                                        "reportId" to reportId,
+                                        "hiddenAt" to FieldValue.serverTimestamp()
+                                    ),
+                                    com.google.firebase.firestore.SetOptions.merge()
+                                )
+                                .addOnSuccessListener {
+                                    submitting = false
+                                    onSubmitted()
+                                }
+                                .addOnFailureListener { e ->
+                                    submitting = false
+                                    error = e.message ?: "Report saved, but failed to hide this post."
+                                }
+                        }
+                        .addOnFailureListener { e ->
+                            submitting = false
+                            error = e.message ?: "Failed to submit report"
+                        }
+
+                }
+            ) { Text(if (submitting) "Submitting…" else "Submit") }
+        },
+        dismissButton = {
+            TextButton(enabled = !submitting, onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }

@@ -1,8 +1,21 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.girlspace.app.ui.reels
+import android.net.Uri
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalLifecycleOwner
-
+import android.content.Intent
+import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import java.text.SimpleDateFormat
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
@@ -25,9 +38,7 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.*
@@ -42,10 +53,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import java.io.File
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.navigation.NavHostController
 import coil.compose.AsyncImage
+import java.util.Date
+import android.os.Environment
 import com.girlspace.app.data.reels.Reel
 import com.girlspace.app.ui.common.glowPulse
 import com.girlspace.app.ui.reels.CreateReelEntrySheet
@@ -53,6 +67,8 @@ import com.girlspace.app.ui.video.SharedPlayerView
 import com.girlspace.app.ui.video.VideoPlaybackViewModel
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import java.util.Locale
+private enum class PendingCamAction { NONE, VIDEO, PHOTO }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -65,32 +81,143 @@ fun ReelsScreen(
     val reels by vm.reels.collectAsState()
     val isLoading by vm.isLoading.collectAsState()
     val canLoadMore by vm.canLoadMore.collectAsState()
+    val activeVideoId by videoVm.activePostId.collectAsState()
 
     val commentsForReelId by vm.commentsForReelId.collectAsState()
     val comments by vm.comments.collectAsState()
     val commentsLoading by vm.commentsLoading.collectAsState()
     val commentsCanLoadMore by vm.commentsCanLoadMore.collectAsState()
-
-    val activeVideoId by videoVm.activePostId.collectAsState()
+    var pendingPhotoUri by remember { mutableStateOf<android.net.Uri?>(null) }
 
     LaunchedEffect(Unit) {
         vm.loadInitial()
     }
+    val context = LocalContext.current
 
-    LaunchedEffect(Unit) {
-        ReelsRefreshBus.events.collect {
-            // ✅ Force refresh so the newly uploaded reel appears in the grid immediately
-            vm.refresh()
-            // if your viewModel doesn't have refresh(), use:
-            // vm.loadInitial(force = true)
+    // What the user intended when we ask for permission
+    var pendingCamAction by remember { mutableStateOf(PendingCamAction.NONE) }
+
+// Launch system camera intents
+    val cameraVideoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+
+        val uri = result.data?.data
+        if (uri == null) {
+            Toast.makeText(context, "Video captured, but camera app returned no URI.", Toast.LENGTH_LONG).show()
+            return@rememberLauncherForActivityResult
+        }
+
+        val encoded = Uri.encode(uri.toString())
+        navController.navigate("reelCreate/$encoded") { launchSingleTop = true }
+    }
+
+
+
+    val cameraPhotoLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode != android.app.Activity.RESULT_OK) return@rememberLauncherForActivityResult
+
+        val uri = pendingPhotoUri
+        if (uri == null) {
+            Toast.makeText(context, "Photo captured, but file URI missing.", Toast.LENGTH_LONG).show()
+            return@rememberLauncherForActivityResult
+        }
+
+        // ✅ For now: we captured the photo successfully.
+        // Upload flow for photos is not wired yet (since reels upload expects video).
+        Toast.makeText(context, "Photo captured successfully.", Toast.LENGTH_SHORT).show()
+    }
+
+// Request CAMERA permission
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (!granted) {
+            Toast.makeText(context, "Camera permission is required.", Toast.LENGTH_LONG).show()
+            pendingCamAction = PendingCamAction.NONE
+            return@rememberLauncherForActivityResult
+        }
+
+        when (pendingCamAction) {
+            PendingCamAction.VIDEO -> {
+                val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+                    putExtra(MediaStore.EXTRA_DURATION_LIMIT, 180)
+                    putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
+                }
+                cameraVideoLauncher.launch(intent)
+            }
+            PendingCamAction.PHOTO -> {
+                val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                cameraPhotoLauncher.launch(intent)
+            }
+            PendingCamAction.NONE -> Unit
+        }
+        pendingCamAction = PendingCamAction.NONE
+    }
+
+    // Helper function: checks permission then launches
+    fun ensureCameraPermissionThen(action: PendingCamAction) {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (granted) {
+            // Launch directly if already allowed
+            when (action) {
+                PendingCamAction.VIDEO -> {
+                    val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
+                        putExtra(MediaStore.EXTRA_DURATION_LIMIT, 180)
+                        putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
+                    }
+                    cameraVideoLauncher.launch(intent)
+                }
+                PendingCamAction.PHOTO -> {
+                    val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+                    val imageFile = File(
+                        context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
+                        "IMG_$timeStamp.jpg"
+                    )
+
+                    val uri = FileProvider.getUriForFile(
+                        context,
+                        "com.girlspace.app.fileprovider",
+                        imageFile
+                    )
+                    pendingPhotoUri = uri
+
+                    val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE).apply {
+                        putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                        addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+
+                    cameraPhotoLauncher.launch(intent)
+                }
+
+                PendingCamAction.NONE -> Unit
+            }
+        } else {
+            pendingCamAction = action
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
-    val lifecycleOwner = LocalLifecycleOwner.current
 
+    // ✅ Single refresh bus collector (you had two; that can double-refresh)
+    LaunchedEffect(Unit) {
+        ReelsRefreshBus.events.collect {
+            vm.refresh()
+        }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val obs = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                vm.refresh() // must force reload
+                vm.refresh()
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -114,12 +241,8 @@ fun ReelsScreen(
                 }
             }
     }
-    LaunchedEffect(Unit) {
-        ReelsRefreshBus.events.collect {
-            vm.refresh()
-        }
-    }
-    // ▶️ Autoplay logic
+
+    // ▶️ Autoplay logic (do not touch playback viewmodel / player; kept as-is)
     LaunchedEffect(gridState, reels) {
         snapshotFlow { gridState.layoutInfo }
             .collect { info ->
@@ -162,15 +285,15 @@ fun ReelsScreen(
 
     Box(Modifier.fillMaxSize()) {
 
-        // ✅ Top creator bar (sticky)
         Column(Modifier.fillMaxSize()) {
             ReelsCreateTopBar(
-                onCamera = { navController.navigate("reelCapture") },
+                onCamera = { showCreateSheet = true }, // ✅ open sheet to choose photo/video
                 onGallery = { navController.navigate("reelGalleryPick") },
-                onYoutube = { navController.navigate("reelYoutube") },
-                onImport = { showCreateSheet = true }, // use sheet for now; later wire FB import
                 onPlus = { showCreateSheet = true }
             )
+
+
+
 
             when {
                 reels.isEmpty() && isLoading -> {
@@ -222,11 +345,11 @@ fun ReelsScreen(
             }
         }
 
-        // ✅ Comments sheet
         val rid = commentsForReelId
         if (!rid.isNullOrBlank()) {
             ReelCommentsSheet(
                 title = "Comments",
+                reelId = rid,
                 comments = comments,
                 isLoading = commentsLoading,
                 onLoadMore = { if (commentsCanLoadMore) vm.loadMoreComments() },
@@ -235,27 +358,28 @@ fun ReelsScreen(
             )
         }
 
-        // ✅ Create entry sheet (your existing file)
         if (showCreateSheet) {
             CreateReelEntrySheet(
                 onDismiss = { showCreateSheet = false },
 
-                onRecord = {
+                // 🎥 System video camera (with permission)
+                onRecordVideo = {
                     showCreateSheet = false
-                    navController.navigate("reelCapture")
+                    ensureCameraPermissionThen(PendingCamAction.VIDEO)
                 },
 
+                // 📸 System photo camera (with permission)
+                onTakePhoto = {
+                    showCreateSheet = false
+                    ensureCameraPermissionThen(PendingCamAction.PHOTO)
+                },
+
+                // 🖼 Gallery (unchanged)
                 onPickFromGallery = {
                     showCreateSheet = false
                     navController.navigate("reelGalleryPick")
-                },
-
-                onAddYoutubeUrl = {
-                    showCreateSheet = false
-                    navController.navigate("reelYoutube")
                 }
             )
-
         }
     }
 }
@@ -264,8 +388,6 @@ fun ReelsScreen(
 private fun ReelsCreateTopBar(
     onCamera: () -> Unit,
     onGallery: () -> Unit,
-    onYoutube: () -> Unit,
-    onImport: () -> Unit,
     onPlus: () -> Unit
 ) {
     val shape = RoundedCornerShape(18.dp)
@@ -293,31 +415,20 @@ private fun ReelsCreateTopBar(
 
             Spacer(Modifier.weight(1f))
 
-            // Colorful glowing action chips
             GlowActionIcon(
                 icon = Icons.Filled.CameraAlt,
                 label = "Camera",
                 glowColor = Color(0xFF00E5FF),
                 onClick = onCamera
             )
+
             GlowActionIcon(
                 icon = Icons.Filled.PhotoLibrary,
                 label = "Gallery",
                 glowColor = Color(0xFF7C4DFF),
                 onClick = onGallery
             )
-            GlowActionIcon(
-                icon = Icons.Filled.VideoLibrary,
-                label = "YouTube",
-                glowColor = Color(0xFFFF1744),
-                onClick = onYoutube
-            )
-            GlowActionIcon(
-                icon = Icons.Filled.Link,
-                label = "Import",
-                glowColor = Color(0xFF00E676),
-                onClick = onImport
-            )
+
             GlowActionIcon(
                 icon = Icons.Filled.Add,
                 label = "More",
@@ -359,7 +470,7 @@ private fun GlowActionIcon(
 
     Box(
         modifier = Modifier
-            .size(44.dp) // ✅ big tap target
+            .size(44.dp)
             .clip(CircleShape)
             .background(Color.Black.copy(alpha = 0.08f))
             .glowPulse(color = glowColor, enabled = true)
@@ -419,7 +530,6 @@ private fun ReelGridTile(
             )
         }
 
-        // 🔇 mute
         IconButton(
             onClick = { videoVm.toggleMute() },
             modifier = Modifier
@@ -435,7 +545,6 @@ private fun ReelGridTile(
             )
         }
 
-        // ❤️ Likes / 👁️ Views / 💬 Comments
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
