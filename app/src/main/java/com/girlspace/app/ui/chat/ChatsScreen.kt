@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.chat
+import com.girlspace.app.data.chat.ChatScope
 import android.annotation.SuppressLint
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.WindowInsets
@@ -98,7 +99,7 @@ data class ChatUserSummary(
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ChatsScreen(
-
+    scope: ChatScope = ChatScope.PUBLIC,
     onOpenThread: (ChatThread) -> Unit = {},
     vm: ChatViewModel = viewModel()
 ) {
@@ -109,6 +110,10 @@ fun ChatsScreen(
 
     val error by vm.errorMessage.collectAsState()
     val lastStartedThread by vm.lastStartedThread.collectAsState()
+    LaunchedEffect(scope) {
+        vm.setScope(scope)
+    }
+
     var isSelectionMode by rememberSaveable { mutableStateOf(false) }
     var selectedThreadIds by rememberSaveable { mutableStateOf(emptySet<String>()) }
     fun enterSelection(threadId: String) {
@@ -149,7 +154,7 @@ fun ChatsScreen(
     LaunchedEffect(lastStartedThread) {
         lastStartedThread?.let { thread ->
             onOpenThread(thread)
-            vm.consumeLastStartedThread()
+            vm.clearLastStartedThread()
         }
     }
     BackHandler(enabled = isSelectionMode) {
@@ -488,6 +493,7 @@ fun ChatsScreen(
                         ChatThreadRow(
                             thread = thread,
                             myId = myId,
+                            scope = scope,
                             isOnline = isOnline,
                             nameCache = nameCache,
                             isMuted = mutedIds.contains(thread.id),
@@ -591,9 +597,10 @@ private fun ChatUserAvatar(
 private fun ChatThreadRow(
     thread: ChatThread,
     myId: String,
+    scope: ChatScope,
     isOnline: Boolean,
     isMuted: Boolean,
-    isSelected: Boolean, // ✅ NEW
+    isSelected: Boolean,
     onToggleMute: (Boolean) -> Unit,
     nameCache: MutableMap<String, String>,
     onClick: () -> Unit,
@@ -610,7 +617,9 @@ private fun ChatThreadRow(
     // Load participants, names, avatars, and presence for groups
     LaunchedEffect(thread.id) {
         try {
-            val doc = firestore.collection("chatThreads")
+            val threadCollection = if (scope == ChatScope.INNER_CIRCLE) "ic_chatThreads" else "chatThreads"
+
+            val doc = firestore.collection(threadCollection)
                 .document(thread.id)
                 .get()
                 .await()

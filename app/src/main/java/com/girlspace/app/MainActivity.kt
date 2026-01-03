@@ -27,7 +27,8 @@ import com.google.android.play.core.install.model.AppUpdateType
 import com.google.android.play.core.install.model.InstallStatus
 import com.google.android.play.core.install.model.UpdateAvailability
 import dagger.hilt.android.AndroidEntryPoint
-
+import android.view.WindowManager
+import androidx.navigation.compose.currentBackStackEntryAsState
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
@@ -78,10 +79,36 @@ class MainActivity : ComponentActivity() {
             val onboardingViewModel: OnboardingViewModel = hiltViewModel()
             val themeMode by onboardingViewModel.themeMode.collectAsState()
 
+            // ✅ listen to current route and enable secure mode only for GirlSpace/Inner Circle
+            val navController = androidx.navigation.compose.rememberNavController()
+            val backStackEntry by navController.currentBackStackEntryAsState()
+            val route = backStackEntry?.destination?.route.orEmpty()
+
+            // 🔐 Decide which routes are protected
+            val secureRoutes = listOf(
+                "inner_circle_entry",
+                "inner_circle_shell",
+                "add_members",
+
+                // ✅ Inner Circle chat routes only
+                "inner_chat",
+                "inner_chat_with_user",
+                "inner_group_chat" // only if you have this route, else remove
+            )
+
+
+            val shouldSecure = secureRoutes.any { key -> route.startsWith(key) }
+
+            androidx.compose.runtime.LaunchedEffect(shouldSecure) {
+                setSecureMode(shouldSecure)
+            }
+
             VibeTheme(themeMode = themeMode) {
-                GirlSpaceApp()
+                // ✅ IMPORTANT: GirlSpaceApp must accept navController so we reuse it
+                GirlSpaceApp(navController = navController)
             }
         }
+
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -150,6 +177,16 @@ class MainActivity : ComponentActivity() {
         intent.type = null
         intent.removeExtra(Intent.EXTRA_TEXT)
         intent.removeExtra(Intent.EXTRA_STREAM)
+    }
+    private fun setSecureMode(enabled: Boolean) {
+        if (enabled) {
+            window.setFlags(
+                WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE
+            )
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
     }
 
     private fun ensureNotificationPermission() {

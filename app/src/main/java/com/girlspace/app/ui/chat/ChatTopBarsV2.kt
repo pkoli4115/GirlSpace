@@ -54,7 +54,8 @@ fun ChatTopBarV2(
     onInfoClick: () -> Unit,
     onReportClick: () -> Unit,
     onBlockClick: () -> Unit,
-    onAddParticipantsClick: () -> Unit
+    isInnerCircle: Boolean,
+        onAddParticipantsClick: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
     val iconColor = MaterialTheme.colorScheme.primary
@@ -142,14 +143,16 @@ fun ChatTopBarV2(
                     }
                 )
 
-                // 📤 Share
-                DropdownMenuItem(
-                    text = { Text("Share chat") },
-                    onClick = {
-                        showMenu = false
-                        onShareClick()
-                    }
-                )
+                if (!isInnerCircle) {
+                    DropdownMenuItem(
+                        text = { Text("Share chat") },
+                        onClick = {
+                            showMenu = false
+                            onShareClick()
+                        }
+                    )
+                }
+
 
                 DropdownMenuItem(
                     text = { Text("Chat info") },
@@ -201,6 +204,7 @@ fun SelectionTopBarV2(
     onDelete: () -> Unit,
     onShareOrForward: () -> Unit,
     onPin: () -> Unit,
+    isInnerCircle: Boolean,
     onReport: () -> Unit
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -237,12 +241,12 @@ fun SelectionTopBarV2(
                 )
             }
 
-            IconButton(onClick = onShareOrForward) {
-                Icon(
-                    imageVector = Icons.Default.Share,
-                    contentDescription = "Share / Forward"
-                )
+            if (!isInnerCircle) {
+                IconButton(onClick = onShareOrForward) {
+                    Icon(Icons.Default.Share, contentDescription = "Share / Forward")
+                }
             }
+
 
             IconButton(onClick = onDelete) {
                 Icon(

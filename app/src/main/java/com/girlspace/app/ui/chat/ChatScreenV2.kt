@@ -8,6 +8,7 @@ package com.girlspace.app.ui.chat
 //   share, long-press reactions, system-keyboard emoji, bee sound on incoming
 //   messages, improved participants limit feedback.
 import java.util.Calendar
+import com.girlspace.app.ui.common.findActivity
 import java.security.Timestamp
 import com.google.firebase.Firebase
 import com.girlspace.app.notifications.ActiveChatTracker
@@ -155,6 +156,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.tasks.await
 import androidx.compose.foundation.lazy.itemsIndexed
 import java.util.Date
+import android.view.WindowManager
+
 // Shared formatter for chat timestamps (HH:mm)
 private val CHAT_TIME_FORMATTER: SimpleDateFormat =
     SimpleDateFormat("HH:mm", Locale.getDefault())
@@ -221,10 +224,35 @@ fun ChatScreenV2(
         onDispose { ActiveChatTracker.clear(context) }
     }
 
-    val activity = context as? Activity
+    val activity = context.findActivity()
     val currentUid = FirebaseAuth.getInstance().currentUser?.uid
     val firestore = remember { FirebaseFirestore.getInstance() }
-    var showComposerEmoji by remember { mutableStateOf(false) }
+    // ✅ Inner Circle enforcement for THIS chat thread only
+    var isInnerCircleThread by remember { mutableStateOf(false) }
+
+    LaunchedEffect(threadId) {
+        try {
+            val snap = firestore.collection("chatThreads")
+                .document(threadId)
+                .get()
+                .await()
+
+            val scope = snap.getString("scope")
+                ?: snap.getString("visibility")
+                ?: snap.getString("threadScope")
+                ?: ""
+
+            val flag = snap.getBoolean("isInnerCircle") == true ||
+                    scope.equals("inner", ignoreCase = true) ||
+                    scope.contains("inner", ignoreCase = true)
+
+            isInnerCircleThread = flag
+        } catch (_: Exception) {
+            isInnerCircleThread = false
+        }
+    }
+
+        var showComposerEmoji by remember { mutableStateOf(false) }
     val keyboardController = LocalSoftwareKeyboardController.current
 
     val reactionPlayer = remember {
@@ -1167,10 +1195,14 @@ fun ChatScreenV2(
     // ───────────────────── Share via system intent ─────────────────────
     // ───────────────────── Share via system intent ─────────────────────
     fun shareMessagesExternally(toShare: List<ChatMessage>) {
+        // 🔒 Hard block: Inner Circle can never share (even if called accidentally)
+        if (isInnerCircleThread) return
+
         if (toShare.isEmpty()) {
-            Toast.makeText(context, "Nothing to share", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Inner Circle chats are private and cannot be shared", Toast.LENGTH_SHORT).show()
             return
         }
+
 
         scope.launch {
             val sdf = SimpleDateFormat("dd MMM yyyy HH:mm", Locale.getDefault())
@@ -1452,13 +1484,15 @@ fun ChatScreenV2(
                         title = headerTitle,
                         isOnline = isOtherOnline,
                         lastSeen = lastSeenText,
+                        isInnerCircle = isInnerCircleThread,
                         onBack = onBack,
                         onSearchClick = { showSearchBar = !showSearchBar },
-                        onVideoClick = {
-                            // Batch-7: record and attach video
-                            requestCameraThen { openVideoRecorder() }
-                        },
+                        onVideoClick = { requestCameraThen { openVideoRecorder() } },
                         onShareClick = {
+                            // Should never be reachable in Inner Circle because UI is hidden,
+                            // but keep this as safety.
+                            if (isInnerCircleThread) return@ChatTopBarV2
+
                             val toShare = messages.takeLast(30)
                             shareMessagesExternally(toShare)
                             onShareThread()
@@ -1468,6 +1502,7 @@ fun ChatScreenV2(
                         onBlockClick = { showBlockConfirm = true },
                         onAddParticipantsClick = { showAddParticipantsDialog = true }
                     )
+
                 }
             } else {
                 // 🔹 Compute selected messages and capabilities
@@ -1482,6 +1517,7 @@ fun ChatScreenV2(
                 SelectionTopBarV2(
                     count = selectedMessageIds.size,
                     canReply = canReply,
+                    isInnerCircle = isInnerCircleThread,
                     onClearSelection = {
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
@@ -1528,14 +1564,22 @@ fun ChatScreenV2(
                         }
                     },
                     onShareOrForward = {
-                        // 🔥 Always share selected messages (text + media)
+                        // Should never be reachable in Inner Circle because UI is hidden,
+                        // but keep safety.
+                        if (isInnerCircleThread) {
+                            selectedMessageIds = emptySet()
+                            vm.closeReactionPicker()
+                            return@SelectionTopBarV2
+                        }
+
                         val toShare = messages.filter { it.id in selectedMessageIds }
                         shareMessagesExternally(toShare)
 
                         selectedMessageIds = emptySet()
                         vm.closeReactionPicker()
                     },
-                    onPin = {
+
+                        onPin = {
                         selectedMessageIds.forEach { id ->
                             vm.pinMessage(id)
                         }

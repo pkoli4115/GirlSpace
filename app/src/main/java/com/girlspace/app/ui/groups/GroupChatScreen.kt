@@ -55,7 +55,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.girlspace.app.R
 import com.girlspace.app.data.chat.ChatMessage
-
+import android.app.Activity
+import android.view.WindowManager
+import com.google.firebase.firestore.FirebaseFirestore
+import kotlinx.coroutines.tasks.await
+import com.girlspace.app.ui.common.findActivity
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GroupChatScreen(
@@ -73,6 +77,40 @@ fun GroupChatScreen(
 
     val context = LocalContext.current
     val currentUid = vm.currentUserId()
+    val activity = context.findActivity()
+    val firestore = remember { FirebaseFirestore.getInstance() }
+
+    var isInnerCircleGroup by remember { mutableStateOf(false) }
+
+    LaunchedEffect(groupId) {
+        try {
+            val snap = firestore.collection("groups")
+                .document(groupId)
+                .get()
+                .await()
+
+            val scope = snap.getString("scope")
+                ?: snap.getString("visibility")
+                ?: ""
+
+            isInnerCircleGroup =
+                snap.getBoolean("isInnerCircle") == true ||
+                        scope.equals("inner", ignoreCase = true) ||
+                        scope.contains("inner", ignoreCase = true)
+        } catch (_: Exception) {
+            isInnerCircleGroup = false
+        }
+    }
+
+    DisposableEffect(isInnerCircleGroup) {
+        val window = activity?.window
+        if (isInnerCircleGroup) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        } else {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
+    }
 
     // Start listening to this group
     LaunchedEffect(groupId) {

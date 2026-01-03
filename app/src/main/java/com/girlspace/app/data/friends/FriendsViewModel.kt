@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.friends
+import com.girlspace.app.data.friends.FriendScope
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -65,17 +66,36 @@ class FriendsViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(FriendsUiState())
     val uiState: StateFlow<FriendsUiState> = _uiState.asStateFlow()
+    private var scope: FriendScope = FriendScope.PUBLIC
+
+    private var friendsJob: Job? = null
+    private var incomingJob: Job? = null
+    private var outgoingJob: Job? = null
 
     private var searchJob: Job? = null
     private var contextUserId: String? = null
     private var contextMode: FriendsListMode = FriendsListMode.FRIENDS
+    fun setScope(newScope: FriendScope) {
+        if (scope == newScope) return
+        scope = newScope
+        restartCoreObservers()
+    }
+
     init {
-        observeFriends()
-        observeIncoming()
-        observeOutgoing()
+        restartCoreObservers()
         loadSuggestions()
         loadFollowing()
     }
+    private fun restartCoreObservers() {
+        friendsJob?.cancel()
+        incomingJob?.cancel()
+        outgoingJob?.cancel()
+
+        friendsJob = viewModelScope.launch { observeFriendsInternal() }
+        incomingJob = viewModelScope.launch { observeIncomingInternal() }
+        outgoingJob = viewModelScope.launch { observeOutgoingInternal() }
+    }
+
     /**
      * Configure this screen when opened from a profile.
      *
@@ -139,43 +159,52 @@ class FriendsViewModel @Inject constructor(
 
     // region Observers
 
-    private fun observeFriends() {
-        viewModelScope.launch {
-            friendRepository.observeFriends().collect { list ->
-                val currentUid = auth.currentUser?.uid
+    private suspend fun observeFriendsInternal() {
+        val flow = if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.observeFriends(scope)
+        } else {
+            friendRepository.observeFriends()
+        }
 
-                // Only auto-apply my own friends when:
-                //  - we are NOT in a "viewing other profile" context
-                //  - AND the current mode is FRIENDS
-                val shouldApplyMyFriends =
-                    (contextUserId == null || contextUserId == currentUid) &&
-                            contextMode == FriendsListMode.FRIENDS
+        flow.collect { list ->
+            val currentUid = auth.currentUser?.uid
+            val shouldApplyMyFriends =
+                (contextUserId == null || contextUserId == currentUid) &&
+                        contextMode == FriendsListMode.FRIENDS
 
-                if (shouldApplyMyFriends) {
-                    _uiState.update { it.copy(friends = list) }
-                    // Friends changed → suggestions ranking may change
-                    loadSuggestions()
-                }
+            if (shouldApplyMyFriends) {
+                _uiState.update { it.copy(friends = list) }
+                loadSuggestions()
             }
         }
     }
 
 
-    private fun observeIncoming() {
-        viewModelScope.launch {
-            friendRepository.observeIncomingRequests().collect { list ->
-                _uiState.update { it.copy(incomingRequests = list) }
-            }
+
+    private suspend fun observeIncomingInternal() {
+        val flow = if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.observeIncomingRequests(scope)
+        } else {
+            friendRepository.observeIncomingRequests()
+        }
+
+        flow.collect { list ->
+            _uiState.update { it.copy(incomingRequests = list) }
         }
     }
 
-    private fun observeOutgoing() {
-        viewModelScope.launch {
-            friendRepository.observeOutgoingRequests().collect { ids ->
-                _uiState.update { it.copy(outgoingRequestIds = ids) }
-            }
+    private suspend fun observeOutgoingInternal() {
+        val flow = if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.observeOutgoingRequests(scope)
+        } else {
+            friendRepository.observeOutgoingRequests()
+        }
+
+        flow.collect { ids ->
+            _uiState.update { it.copy(outgoingRequestIds = ids) }
         }
     }
+
 
     // endregion
 
@@ -348,7 +377,8 @@ class FriendsViewModel @Inject constructor(
     fun sendFriendRequest(toUid: String) {
         viewModelScope.launch {
             try {
-                friendRepository.sendFriendRequest(toUid)
+                if (scope == FriendScope.INNER_CIRCLE) friendRepository.sendFriendRequest(toUid, scope)
+                else friendRepository.sendFriendRequest(toUid)
                 // Once request is sent, hide from suggestions list
                 hideSuggestion(toUid)
             } catch (e: Exception) {
@@ -357,74 +387,59 @@ class FriendsViewModel @Inject constructor(
         }
     }
 
-    fun cancelFriendRequest(toUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.cancelFriendRequest(toUid)
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to cancel request") }
-            }
+    fun cancelFriendRequest(toUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.cancelFriendRequest(toUid, scope)
+        } else {
+            friendRepository.cancelFriendRequest(toUid)
         }
     }
 
-    fun acceptFriendRequest(fromUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.acceptFriendRequest(fromUid)
-                // After accepting, reload suggestions (friend set changed)
-                loadSuggestions()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to accept request") }
-            }
+
+    fun acceptFriendRequest(fromUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.acceptFriendRequest(fromUid, scope)
+        } else {
+            friendRepository.acceptFriendRequest(fromUid)
         }
     }
 
-    fun rejectFriendRequest(fromUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.rejectFriendRequest(fromUid)
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to reject request") }
-            }
+
+    fun rejectFriendRequest(fromUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.rejectFriendRequest(fromUid, scope)
+        } else {
+            friendRepository.rejectFriendRequest(fromUid)
         }
     }
 
-    fun unfriend(friendUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.unfriend(friendUid)
-                loadSuggestions()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to unfriend") }
-            }
+
+    fun unfriend(friendUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.unfriend(friendUid, scope)
+        } else {
+            friendRepository.unfriend(friendUid)
         }
     }
 
-    fun blockUser(targetUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.blockUser(targetUid)
-                // Remove from friends + suggestions instantly
-                hideSuggestion(targetUid)
-                loadSuggestions()
-                // Also refresh following state (block may remove follow)
-                loadFollowing()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to block user") }
-            }
+
+    fun blockUser(targetUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.blockUser(targetUid, scope)
+        } else {
+            friendRepository.blockUser(targetUid)
         }
     }
 
-    fun unblockUser(targetUid: String) {
-        viewModelScope.launch {
-            try {
-                friendRepository.unblockUser(targetUid)
-                loadSuggestions()
-            } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message ?: "Failed to unblock user") }
-            }
+
+    fun unblockUser(targetUid: String) = viewModelScope.launch {
+        if (scope == FriendScope.INNER_CIRCLE) {
+            friendRepository.unblockUser(targetUid, scope)
+        } else {
+            friendRepository.unblockUser(targetUid)
         }
     }
+
 
     // endregion
 

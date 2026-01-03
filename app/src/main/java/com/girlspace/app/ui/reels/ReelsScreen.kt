@@ -1,6 +1,10 @@
 @file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.girlspace.app.ui.reels
 import android.net.Uri
+import com.girlspace.app.core.SoftLaunchPrefs
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+
 import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -82,6 +86,8 @@ fun ReelsScreen(
     val isLoading by vm.isLoading.collectAsState()
     val canLoadMore by vm.canLoadMore.collectAsState()
     val activeVideoId by videoVm.activePostId.collectAsState()
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
 
     val commentsForReelId by vm.commentsForReelId.collectAsState()
     val comments by vm.comments.collectAsState()
@@ -144,7 +150,7 @@ fun ReelsScreen(
         when (pendingCamAction) {
             PendingCamAction.VIDEO -> {
                 val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
-                    putExtra(MediaStore.EXTRA_DURATION_LIMIT, 180)
+                    putExtra(MediaStore.EXTRA_DURATION_LIMIT, 30)
                     putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
                 }
                 cameraVideoLauncher.launch(intent)
@@ -170,7 +176,7 @@ fun ReelsScreen(
             when (action) {
                 PendingCamAction.VIDEO -> {
                     val intent = Intent(MediaStore.ACTION_VIDEO_CAPTURE).apply {
-                        putExtra(MediaStore.EXTRA_DURATION_LIMIT, 180)
+                        putExtra(MediaStore.EXTRA_DURATION_LIMIT, 30)
                         putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1)
                     }
                     cameraVideoLauncher.launch(intent)
@@ -282,6 +288,20 @@ fun ReelsScreen(
     }
 
     var showCreateSheet by remember { mutableStateOf(false) }
+// 🌸 Soft Launch: show once when user first attempts to create/upload a reel
+    LaunchedEffect(showCreateSheet) {
+        if (!showCreateSheet) return@LaunchedEffect
+        val seen = SoftLaunchPrefs.seenUploadBannerFlow(context).first()
+        if (!seen) {
+            snackbarHostState.showSnackbar(
+                message =
+                    "🌸 Togetherly is opening features gradually to keep the community safe.\n" +
+                            "Short videos & limited photos are available now.\n" +
+                            "More features unlock as the community grows 💗"
+            )
+            SoftLaunchPrefs.markUploadBannerSeen(context)
+        }
+    }
 
     Box(Modifier.fillMaxSize()) {
 

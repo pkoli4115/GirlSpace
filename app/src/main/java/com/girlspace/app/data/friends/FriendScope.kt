@@ -1,4 +1,6 @@
 package com.girlspace.app.data.friends
 
-class FriendScope {
+enum class FriendScope {
+    PUBLIC,
+    INNER_CIRCLE
 }

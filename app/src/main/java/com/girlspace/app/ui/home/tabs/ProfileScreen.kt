@@ -98,7 +98,7 @@ fun ProfileScreen(
     val profileState by profileViewModel.uiState.collectAsState()
 
     // 🔹 Chat VM used for "Message" button → start or open 1:1 thread
-    val chatViewModel: ChatViewModel = viewModel()
+    val chatViewModel: ChatViewModel = hiltViewModel()
     val lastStartedThread by chatViewModel.lastStartedThread.collectAsState()
 
     // Local state derived from Firestore + FirebaseAuth (for SELF profile only)
@@ -592,13 +592,16 @@ fun ProfileScreen(
     }
 
     // 🔹 Once ChatViewModel has started/loaded a thread, jump into ChatScreen
+    var navigatedToThreadId by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(lastStartedThread) {
-        val thread = lastStartedThread
-        if (thread != null) {
-            navController.navigate("chat/${thread.id}")
-            chatViewModel.consumeLastStartedThread()
-        }
+        val thread = lastStartedThread ?: return@LaunchedEffect
+        if (navigatedToThreadId == thread.id) return@LaunchedEffect
+
+        navigatedToThreadId = thread.id
+        navController.navigate("chat/${thread.id}")
     }
+
 
     // Vibe selection dialog (SELF only)
     if (showVibeDialog && isSelf) {

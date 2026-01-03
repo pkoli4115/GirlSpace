@@ -4,7 +4,7 @@ package com.girlspace.app.ui.chat
 // Version: v1.3.2 – Delete-for-everyone: optimistic local soft-delete for text & media
 
 import kotlinx.coroutines.flow.asStateFlow
-
+import kotlinx.coroutines.delay
 import androidx.lifecycle.viewModelScope
 import com.girlspace.app.moderation.ModerationService
 import com.girlspace.app.moderation.ContentKind
@@ -22,7 +22,6 @@ import android.content.Context
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import com.girlspace.app.data.chat.ChatMessage
 import com.girlspace.app.data.chat.ChatRepository
 import com.girlspace.app.data.chat.ChatThread
@@ -34,21 +33,27 @@ import com.google.firebase.firestore.SetOptions
 import com.google.firebase.storage.FirebaseStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import com.girlspace.app.data.chat.ChatScope
 
 class ChatViewModel : ViewModel() {
 
     private val auth: FirebaseAuth = FirebaseAuth.getInstance()
     private val firestore = FirebaseFirestore.getInstance()
     private val storage = FirebaseStorage.getInstance()
-    private val messagesRef = firestore.collection("chat_messages")
+    private val messagesRef get() = messagesCol(currentScope)
     // --- MODERATION SUPPORT ---
 
+    private var currentScope: ChatScope = ChatScope.PUBLIC
+
+    private fun threadsCol(scope: ChatScope) =
+        firestore.collection(if (scope == ChatScope.INNER_CIRCLE) "ic_chatThreads" else "chatThreads")
+
+    private fun messagesCol(scope: ChatScope) =
+        firestore.collection(if (scope == ChatScope.INNER_CIRCLE) "ic_chat_messages" else "chat_messages")
 
     private val moderationManager = ModerationManager()
 
@@ -69,11 +74,20 @@ class ChatViewModel : ViewModel() {
     fun setThreadsPinned(threadIds: Set<String>, pinned: Boolean) {
         if (threadIds.isEmpty()) return
 
-        // Optimistic UI: keep list stable and reorder will come from Firestore listener
+        val uid = auth.currentUser?.uid ?: run {
+            _errorMessage.value = "Not logged in"
+            return
+        }
+
         viewModelScope.launch {
             threadIds.forEach { id ->
                 try {
-                    repo.setThreadPinned(id, pinned)
+                    repo.setThreadPinned(
+                        threadId = id,
+                        uid = uid,
+                        pinned = pinned,
+                        scope = currentScope
+                    )
                 } catch (e: Exception) {
                     Log.w("ChatViewModel", "setThreadsPinned failed for $id", e)
                     _errorMessage.value = e.message ?: "Pin action failed"
@@ -82,8 +96,14 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+
     fun deleteThreadsForMe(threadIds: Set<String>) {
         if (threadIds.isEmpty()) return
+
+        val uid = auth.currentUser?.uid ?: run {
+            _errorMessage.value = "Not logged in"
+            return
+        }
 
         // Optimistic UI: remove immediately so user sees it instantly
         val current = _threads.value
@@ -93,7 +113,11 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             threadIds.forEach { id ->
                 try {
-                    repo.deleteThreadForMe(id)
+                    repo.deleteThreadForMe(
+                        threadId = id,
+                        uid = uid,
+                        scope = currentScope
+                    )
                 } catch (e: Exception) {
                     Log.w("ChatViewModel", "deleteThreadsForMe failed for $id", e)
                     _errorMessage.value = e.message ?: "Delete failed"
@@ -101,6 +125,7 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
 
     private fun Any?.toMillisSafe(): Long {
         return when (this) {
@@ -157,6 +182,19 @@ class ChatViewModel : ViewModel() {
             started = SharingStarted.Eagerly,
             initialValue = emptyList()
         )
+    fun setScope(scope: ChatScope) {
+        if (currentScope == scope) return
+        currentScope = scope
+
+        // restart threads listener for new scope
+        threadsListener?.remove()
+        listenThreads()
+
+        // if currently inside a thread, reload messages from correct scope
+        _selectedThread.value?.let { t ->
+            selectThread(t)
+        }
+    }
 
     // --- BLOCKED USERS STATE ---
     private val _blockedUsers = MutableStateFlow<List<String>>(emptyList())
@@ -252,7 +290,7 @@ class ChatViewModel : ViewModel() {
 // -------------------------------------------------------------
     private fun markThreadAsRead(threadId: String) {
         val uid = auth.currentUser?.uid ?: return
-        firestore.collection("chatThreads")
+        threadsCol(currentScope)
             .document(threadId)
             .update("unread_$uid", 0L)
             .addOnFailureListener { e ->
@@ -338,19 +376,30 @@ class ChatViewModel : ViewModel() {
                 var anyPinned = false
 
                 for (id in threadIds) {
-                    val snap = firestore.collection("chatThreads").document(id).get().await()
+                    val snap = threadsCol(currentScope)
+                        .document(id)
+                        .get()
+                        .await()
+
                     val v = snap.get("pinnedAt_$uid")
-                    val pinnedAt = v.toMillisSafe()   // ✅ you already have toMillisSafe() in VM
+                    val pinnedAt = v.toMillisSafe()
                     if (pinnedAt > 0L) {
                         anyPinned = true
                         break
                     }
                 }
 
+
                 val willPin = !anyPinned
                 threadIds.forEach { id ->
-                    repo.setThreadPinned(id, willPin)
+                    repo.setThreadPinned(
+                        threadId = id,
+                        uid = uid,
+                        pinned = willPin,
+                        scope = currentScope
+                    )
                 }
+
             } catch (e: Exception) {
                 Log.w("ChatViewModel", "toggleThreadsPinned failed", e)
                 _errorMessage.value = "Pin failed. Try again."
@@ -382,24 +431,40 @@ class ChatViewModel : ViewModel() {
         }
     }
     fun setThreadPinned(threadId: String, pinned: Boolean) {
+        val uid = auth.currentUser?.uid ?: return
         viewModelScope.launch {
-            repo.setThreadPinned(threadId, pinned)
+            repo.setThreadPinned(
+                threadId = threadId,
+                uid = uid,
+                pinned = pinned,
+                scope = currentScope
+            )
         }
     }
 
     fun deleteThreadForMe(threadId: String) {
+        val uid = auth.currentUser?.uid ?: return
         viewModelScope.launch {
-            repo.deleteThreadForMe(threadId)
+            repo.deleteThreadForMe(
+                threadId = threadId,
+                uid = uid,
+                scope = currentScope
+            )
         }
     }
+
+
 
     private fun markThreadReadEverywhere(threadId: String) {
         val uid = currentUserId ?: return
 
         viewModelScope.launch {
             // 1) Clear WhatsApp-style unread count in chatThreads
-            repo.markThreadRead(threadId)
-
+            repo.markThreadRead(
+                threadId = threadId,
+                uid = uid,
+                scope = currentScope
+            )
             // 2) Mark bell CHAT notifications as read for this thread
             try {
                 val notifCol = firestore.collection("users")
@@ -626,7 +691,7 @@ class ChatViewModel : ViewModel() {
     // THREADS + FILTER
     // -------------------------------------------------------------
     private fun listenThreads() {
-        threadsListener = repo.observeThreads { list ->
+        threadsListener = repo.observeThreads(scope = currentScope) { list ->
             _threads.value = list
             applyThreadFilter()
             if (_selectedThread.value == null && list.isNotEmpty()) {
@@ -634,6 +699,7 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
+
 
     private fun applyThreadFilter() {
         val q = _searchQuery.value.trim().lowercase()
@@ -734,7 +800,7 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 _isStartingChat.value = true
-                val thread = repo.startOrGetThreadByEmail(email)
+                val thread = repo.startOrGetThreadByEmail(email, scope = currentScope)
                 selectThread(thread)
                 _lastStartedThread.value = thread
                 markUserActive()
@@ -746,16 +812,20 @@ class ChatViewModel : ViewModel() {
         }
     }
 
-    fun startChatWithUser(otherUid: String) {
+    fun startChatWithUser(otherUid: String, scope: ChatScope = currentScope) {
         val myUid = auth.currentUser?.uid ?: return
         if (otherUid == myUid) return
+
+        // ✅ ensure this call runs against intended scope
+        if (currentScope != scope) {
+            setScope(scope)
+        }
 
         viewModelScope.launch {
             try {
                 _isStartingChat.value = true
 
-                // Use same "chatThreads" collection as repository
-                val threadsRef = firestore.collection("chatThreads")
+                val threadsRef = threadsCol(scope)
 
                 val existingAB = threadsRef
                     .whereEqualTo("userA", myUid)
@@ -772,10 +842,8 @@ class ChatViewModel : ViewModel() {
                 val existingDoc = (existingAB.documents + existingBA.documents)
                     .firstOrNull { doc ->
                         val participants = (doc.get("participants") as? List<*>)?.filterIsInstance<String>().orEmpty()
-                        // ✅ Only treat as 1-1 if exactly 2 participants
                         participants.size == 2
                     }
-
 
                 val thread: ChatThread = if (existingDoc != null) {
                     ChatThread(
@@ -789,24 +857,11 @@ class ChatViewModel : ViewModel() {
                         unreadCount = (existingDoc.get("unread_$myUid") as? Long)?.toInt() ?: 0
                     )
                 } else {
-                    val meDoc = firestore.collection("users")
-                        .document(myUid)
-                        .get()
-                        .await()
-                    val otherDoc = firestore.collection("users")
-                        .document(otherUid)
-                        .get()
-                        .await()
+                    val meDoc = firestore.collection("users").document(myUid).get().await()
+                    val otherDoc = firestore.collection("users").document(otherUid).get().await()
 
-                    val myName =
-                        meDoc.getString("displayName")
-                            ?: meDoc.getString("name")
-                            ?: "You"
-
-                    val otherName =
-                        otherDoc.getString("displayName")
-                            ?: otherDoc.getString("name")
-                            ?: "GirlSpace user"
+                    val myName = meDoc.getString("displayName") ?: meDoc.getString("name") ?: "You"
+                    val otherName = otherDoc.getString("displayName") ?: otherDoc.getString("name") ?: "GirlSpace user"
 
                     val newDoc = threadsRef.document()
                     val now = System.currentTimeMillis()
@@ -840,6 +895,7 @@ class ChatViewModel : ViewModel() {
                 selectThread(thread)
                 _lastStartedThread.value = thread
                 markUserActive()
+
             } catch (e: Exception) {
                 Log.e("ChatViewModel", "startChatWithUser failed", e)
                 _errorMessage.value = e.message
@@ -848,8 +904,7 @@ class ChatViewModel : ViewModel() {
             }
         }
     }
-
-    fun consumeLastStartedThread() {
+    fun clearLastStartedThread() {
         _lastStartedThread.value = null
     }
 
@@ -874,7 +929,7 @@ class ChatViewModel : ViewModel() {
             // Not in local list -> fetch from Firestore
             viewModelScope.launch {
                 try {
-                    val snap = firestore.collection("chatThreads")
+                    val snap = threadsCol(currentScope)
                         .document(threadId)
                         .get()
                         .await()
@@ -904,6 +959,7 @@ class ChatViewModel : ViewModel() {
     // -------------------------------------------------------------
     fun selectThread(thread: ChatThread) {
         _selectedThread.value = thread
+        startPinnedAndBlockedListeners(thread.id)
         markThreadAsRead(thread.id)
         markChatNotificationsRead(thread.id)
         val myId = auth.currentUser?.uid ?: return
@@ -911,9 +967,10 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 // 1) Reset unread counter for THIS thread for me (drives ChatsScreen badges)
-                firestore.collection("chatThreads")
+                threadsCol(currentScope)
                     .document(thread.id)
                     .update("unread_$myId", 0L)
+
 
                 // 2) Mark bell notifications for THIS thread as read
                 // users/{uid}/notifications where entityId == threadId and read == false
@@ -937,7 +994,7 @@ class ChatViewModel : ViewModel() {
         // 1) LISTEN FOR MESSAGES IN THIS THREAD
         // -----------------------------------------
         msgListener?.remove()
-        msgListener = repo.observeMessages(threadId = thread.id) { incoming ->
+        msgListener = repo.observeMessages(threadId = thread.id, scope = currentScope) { incoming ->
             val uid = currentUserId
 
             // Merge incoming snapshot with our existing local state so that
@@ -1075,11 +1132,12 @@ class ChatViewModel : ViewModel() {
 
         // Listen for pinned message ids on chatThreads/{threadId}
         pinnedListener?.remove()
-        pinnedListener = firestore.collection("chatThreads")
+        pinnedListener = threadsCol(currentScope)
             .document(threadId)
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
-                val pinned = (snapshot.get("pinnedMessageIds") as? List<String>).orEmpty()
+                val pinned =
+                    (snapshot.get("pinnedMessageIds") as? List<*>)?.filterIsInstance<String>().orEmpty()
                 _pinnedIds.value = pinned
             }
 
@@ -1089,7 +1147,8 @@ class ChatViewModel : ViewModel() {
             .document(uid)
             .addSnapshotListener { snapshot, error ->
                 if (error != null || snapshot == null || !snapshot.exists()) return@addSnapshotListener
-                val blocked = (snapshot.get("blockedUsers") as? List<String>).orEmpty()
+                val blocked =
+                    (snapshot.get("blockedUsers") as? List<*>)?.filterIsInstance<String>().orEmpty()
                 _blockedUsers.value = blocked
             }
     }
@@ -1561,9 +1620,10 @@ class ChatViewModel : ViewModel() {
             try {
                 repo.addReaction(
                     messageId = messageId,
-                    userId = uid,
-                    emoji = emoji
+                    emoji = emoji,
+                    scope = currentScope
                 )
+
             } catch (e: Exception) {
                 _errorMessage.value = e.message
             }
@@ -1578,7 +1638,7 @@ class ChatViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val threadRef = firestore.collection("chatThreads")
+                val threadRef = threadsCol(currentScope)
                     .document(thread.id)
 
                 firestore.runTransaction { tx ->
@@ -1604,9 +1664,7 @@ class ChatViewModel : ViewModel() {
 
         viewModelScope.launch {
             try {
-                val threadRef = firestore.collection("chatThreads")
-                    .document(thread.id)
-
+                val threadRef = threadsCol(currentScope).document(thread.id)
                 firestore.runTransaction { tx ->
                     val snap = tx.get(threadRef)
                     val current = (snap.get("pinnedMessageIds") as? List<String>)

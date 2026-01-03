@@ -1,6 +1,7 @@
 package com.girlspace.app.ui.login
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.Image
 import androidx.compose.ui.graphics.Brush
@@ -98,6 +99,63 @@ subtitle = "Grow with Devotion."
         subtitle = "Your social world."
     )
 )
+private const val OTP_RESEND_COOLDOWN_SEC = 60
+private const val OTP_MAX_REQUESTS = 3
+private const val OTP_MAX_VERIFY_FAILS = 5
+private const val OTP_WINDOW_MS = 15 * 60 * 1000L
+
+private object OtpLimiter {
+    private const val PREF = "otp_limiter"
+
+    private fun sp(ctx: android.content.Context) =
+        ctx.getSharedPreferences(PREF, android.content.Context.MODE_PRIVATE)
+
+    fun isBlocked(ctx: android.content.Context): Boolean {
+        val until = sp(ctx).getLong("blocked_until", 0L)
+        return System.currentTimeMillis() < until
+    }
+
+    fun remainingBlockSec(ctx: android.content.Context): Int {
+        val until = sp(ctx).getLong("blocked_until", 0L)
+        return ((until - System.currentTimeMillis()) / 1000).toInt().coerceAtLeast(0)
+    }
+
+    fun recordRequest(ctx: android.content.Context) {
+        val now = System.currentTimeMillis()
+        val s = sp(ctx)
+
+        val windowStart = s.getLong("window_start", now)
+        val count = if (now - windowStart < OTP_WINDOW_MS)
+            s.getInt("req_count", 0) + 1 else 1
+
+        s.edit()
+            .putLong("window_start", if (count == 1) now else windowStart)
+            .putInt("req_count", count)
+            .apply()
+
+        if (count >= OTP_MAX_REQUESTS) {
+            s.edit().putLong("blocked_until", now + OTP_WINDOW_MS).apply()
+        }
+    }
+
+    fun recordVerifyFail(ctx: android.content.Context) {
+        val now = System.currentTimeMillis()
+        val s = sp(ctx)
+
+        val windowStart = s.getLong("verify_start", now)
+        val count = if (now - windowStart < OTP_WINDOW_MS)
+            s.getInt("verify_count", 0) + 1 else 1
+
+        s.edit()
+            .putLong("verify_start", if (count == 1) now else windowStart)
+            .putInt("verify_count", count)
+            .apply()
+
+        if (count >= OTP_MAX_VERIFY_FAILS) {
+            s.edit().putLong("blocked_until", now + OTP_WINDOW_MS).apply()
+        }
+    }
+}
 
 @Composable
 fun LoginScreen(
@@ -115,6 +173,14 @@ fun LoginScreen(
     var resendToken by remember { mutableStateOf<PhoneAuthProvider.ForceResendingToken?>(null) }
     var isSendingOtp by remember { mutableStateOf(false) }
     var isVerifying by remember { mutableStateOf(false) }
+    var resendCooldown by rememberSaveable { mutableStateOf(0) }
+
+    LaunchedEffect(resendCooldown) {
+        if (resendCooldown > 0) {
+            delay(1000)
+            resendCooldown -= 1
+        }
+    }
 
     // ---------- GOOGLE SIGN-IN SETUP ----------
 
@@ -159,10 +225,22 @@ fun LoginScreen(
                                 phoneNumberOverride = null
                             )
                         } else {
+                            OtpLimiter.recordVerifyFail(context)
+
+                            if (OtpLimiter.isBlocked(context)) {
+                                Toast.makeText(
+                                    context,
+                                    "Too many failed attempts. Try again later.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                return@addOnCompleteListener
+                            }
+
                             Log.e(
                                 "GirlSpace",
                                 "Google login: Firebase signIn failed",
                                 authResult.exception
+
                             )
                             Toast.makeText(
                                 context,
@@ -527,34 +605,53 @@ fun LoginScreen(
                         Text(if (isVerifying) "Verifying..." else "Verify & Continue")
                     }
                 } else {
+                    val blocked = OtpLimiter.isBlocked(context)
+                    val blockSec = OtpLimiter.remainingBlockSec(context)
+
+                    val canSend =
+                        !isSendingOtp &&
+                                resendCooldown == 0 &&
+                                !blocked
+
                     Button(
                         modifier = Modifier.fillMaxWidth(),
+                        enabled = canSend,
                         onClick = {
-                            if (phoneNumber.isBlank()) {
+                            if (blocked) {
                                 Toast.makeText(
                                     context,
-                                    "Enter phone number",
-                                    Toast.LENGTH_SHORT
+                                    "Too many requests. Try again in ${blockSec}s",
+                                    Toast.LENGTH_LONG
                                 ).show()
                                 return@Button
                             }
+
+                            resendCooldown = OTP_RESEND_COOLDOWN_SEC
+                            OtpLimiter.recordRequest(context)
+
                             isSendingOtp = true
+
                             val options = PhoneAuthOptions.newBuilder(firebaseAuth)
                                 .setPhoneNumber(phoneNumber.trim())
                                 .setTimeout(60L, TimeUnit.SECONDS)
                                 .setActivity(activity)
                                 .setCallbacks(phoneCallbacks)
-                                .apply {
-                                    resendToken?.let {
-                                        this.setForceResendingToken(it)
-                                    }
-                                }
+                                .apply { resendToken?.let { setForceResendingToken(it) } }
                                 .build()
+
                             PhoneAuthProvider.verifyPhoneNumber(options)
                         }
                     ) {
-                        Text(if (isSendingOtp) "Sending OTP..." else "Send OTP")
+                        Text(
+                            when {
+                                blocked -> "Try again in ${blockSec}s"
+                                resendCooldown > 0 -> "Resend in ${resendCooldown}s"
+                                isSendingOtp -> "Sending OTP..."
+                                else -> "Send OTP"
+                            }
+                        )
                     }
+
                 }
             }
         }

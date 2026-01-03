@@ -1,7 +1,9 @@
 package com.girlspace.app.ui.friends
+import com.girlspace.app.data.friends.FriendScope
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Button
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material3.Checkbox
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.LaunchedEffect
@@ -45,6 +47,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
+import android.R.attr.enabled
 import coil.request.ImageRequest
 import com.girlspace.app.data.friends.FriendRequestItem
 import com.girlspace.app.data.friends.FriendUserSummary
@@ -57,16 +60,42 @@ fun FriendsScreen(
     onOpenChat: (String) -> Unit = {},
     onOpenProfile: (String) -> Unit = {},
     onBack: () -> Unit = {},
-    viewModel: FriendsViewModel = hiltViewModel()
-) {
+    scope: FriendScope = FriendScope.PUBLIC,
 
+    // ✅ make optional so normal calls compile
+    selectionMode: Boolean = false,
+    disabledIds: Set<String> = emptySet(),
+    preselectedIds: Set<String> = emptySet(),
+    onSelectionDone: ((Set<String>) -> Unit)? = null,
+
+// ✅ NEW (optional): hint shown only in selection mode
+    selectionHint: String? = null,
+
+    viewModel: FriendsViewModel = hiltViewModel()
+)
+{
+
+    val isInnerCircle = scope == FriendScope.INNER_CIRCLE
     val uiState by viewModel.uiState.collectAsState()
+    LaunchedEffect(scope) {
+        viewModel.setScope(scope)
+    }
+
     LaunchedEffect(profileUserId, initialTab) {
         viewModel.configureForProfile(profileUserId, initialTab)
     }
 
+    var selectedIds by rememberSaveable(selectionMode, preselectedIds) {
+        mutableStateOf(preselectedIds)
+    }
 
-    val tabs = listOf("friends", "requests", "connect", "search")
+
+
+
+    val tabs = if (isInnerCircle)
+        listOf("Connections", "Requests", "Search")
+    else
+        listOf("Friends", "Requests", "Search")
 
     var selectedTabIndex by rememberSaveable(profileUserId, initialTab) {
         val fromNav = when (initialTab?.lowercase()) {
@@ -96,11 +125,15 @@ fun FriendsScreen(
             .padding(top = 8.dp)
     ) {
         // Simple top bar with optional back arrow and context title
-        val titleText = when (initialTab?.lowercase()) {
-            "followers" -> "Followers"
-            "following" -> "Following"
-            "friends" -> "Friends"
-            else -> "Friends & connections"
+        val titleText = if (scope == FriendScope.INNER_CIRCLE) {
+            "My Circle"
+        } else {
+            when (initialTab?.lowercase()) {
+                "followers" -> "Followers"
+                "following" -> "Following"
+                "friends" -> "Friends"
+                else -> "Friends & connections"
+            }
         }
 
         Row(
@@ -123,6 +156,44 @@ fun FriendsScreen(
                 text = titleText,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold
+            )
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            if (selectionMode) {
+                val hasChanges = selectedIds != preselectedIds
+                val count = selectedIds.size
+                val enabled = hasChanges
+                Text(
+                    text = "Done ($count)",
+                    modifier = Modifier
+                        .clip(MaterialTheme.shapes.small)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+                        .clickable(enabled = enabled) {
+                            onSelectionDone?.invoke(selectedIds)
+
+                            if (onSelectionDone == null) {
+                                onBack()
+                            }
+                        }
+
+
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+
+
+
+        }
+// ✅ Subtle selection hint (only in selection mode)
+        if (selectionMode && !selectionHint.isNullOrBlank()) {
+            Text(
+                text = selectionHint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 6.dp)
             )
         }
 
@@ -155,22 +226,38 @@ fun FriendsScreen(
 
         Box(modifier = Modifier.fillMaxSize()) {
             when (selectedTabIndex) {
-                // Friends tab – Messenger-style friend rows with 3-dot menu
                 0 -> FriendsTab(
                     friends = uiState.friends,
                     followingIds = uiState.followingIds,
+                    selectionMode = selectionMode,
+                    selectedIds = selectedIds,
+                    disabledIds = disabledIds,
+                    onToggleSelect = { uid ->
+                        selectedIds =
+                            if (selectedIds.contains(uid))
+                                selectedIds - uid
+                            else
+                                selectedIds + uid
+                    },
                     onViewProfile = { friendUid ->
-                        onOpenProfile(friendUid)
+                        if (!selectionMode) {
+                            onOpenProfile(friendUid)
+                        } else {
+                            // In selection mode, tapping row should toggle selection
+                            if (!disabledIds.contains(friendUid)) {
+                                selectedIds =
+                                    if (selectedIds.contains(friendUid)) selectedIds - friendUid
+                                    else selectedIds + friendUid
+                            }
+                        }
                     },
-                    onMessage = { friendUid ->
-                        onOpenChat(friendUid)
-                    },
+
+                    onMessage = { friendUid -> if (!selectionMode) onOpenChat(friendUid) },
                     onFollow = viewModel::followUser,
                     onUnfollow = viewModel::unfollowUser,
                     onUnfriend = viewModel::unfriend,
                     onBlock = viewModel::blockUser
                 )
-
 
                 1 -> RequestsTab(
                     requests = uiState.incomingRequests,
@@ -178,23 +265,16 @@ fun FriendsScreen(
                     onReject = viewModel::rejectFriendRequest
                 )
 
-                2 -> SuggestionsTab(
-                    suggestions = uiState.suggestions,
-                    outgoingRequestIds = uiState.outgoingRequestIds,
-                    friends = uiState.friends,
-                    mutualCounts = uiState.mutualFriendsCounts,
-                    onConfirm = viewModel::sendFriendRequest,
-                    onDecline = viewModel::hideSuggestion
-                )
-
-                3 -> SearchTab(
+                2 -> SearchTab(
                     uiState = uiState,
                     onQueryChange = viewModel::onSearchQueryChange,
                     onSendRequest = viewModel::sendFriendRequest,
                     outgoingRequestIds = uiState.outgoingRequestIds,
-                    friends = uiState.friends
+                    friends = uiState.friends,
+                    isInnerCircle = isInnerCircle
                 )
             }
+
 
             if (showGlobalLoading) {
                 CircularProgressIndicator(
@@ -210,6 +290,10 @@ fun FriendsScreen(
 private fun FriendsTab(
     friends: List<FriendUserSummary>,
     followingIds: Set<String>,
+    selectionMode: Boolean,
+    disabledIds: Set<String>,
+    selectedIds: Set<String>,
+    onToggleSelect: (String) -> Unit,
     onViewProfile: (String) -> Unit,
     onMessage: (String) -> Unit,
     onFollow: (String) -> Unit,
@@ -217,6 +301,7 @@ private fun FriendsTab(
     onUnfriend: (String) -> Unit,
     onBlock: (String) -> Unit
 ) {
+
     if (friends.isEmpty()) {
         Box(
             modifier = Modifier.fillMaxSize(),
@@ -233,11 +318,20 @@ private fun FriendsTab(
     ) {
         items(friends, key = { it.uid }) { friend ->
             var menuExpanded by remember { mutableStateOf(false) }
+            val isDisabled = disabledIds.contains(friend.uid)
+            val isSelected = selectedIds.contains(friend.uid)
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { onViewProfile(friend.uid) }
+                    .clickable {
+                        if (selectionMode) {
+                            if (!isDisabled) onToggleSelect(friend.uid)
+                        } else {
+                            onViewProfile(friend.uid)
+                        }
+                    }
+
                     .padding(vertical = 8.dp)
             ) {
                 Row(
@@ -251,7 +345,6 @@ private fun FriendsTab(
 
 
                     Spacer(modifier = Modifier.width(12.dp))
-
                     Column(
                         modifier = Modifier.weight(1f)
                     ) {
@@ -263,359 +356,385 @@ private fun FriendsTab(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
-                    }
 
-                    Box {
-                        IconButton(onClick = { menuExpanded = true }) {
-                            Icon(
-                                imageVector = Icons.Default.MoreVert,
-                                contentDescription = "More"
-                            )
-                        }
-
-                        val isFollowing = followingIds.contains(friend.uid)
-
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false }
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text("View profile") },
-                                onClick = {
-                                    menuExpanded = false
-                                    onViewProfile(friend.uid)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Message") },
-                                onClick = {
-                                    menuExpanded = false
-                                    onMessage(friend.uid)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = {
-                                    Text(if (isFollowing) "Unfollow" else "Follow")
-                                },
-                                onClick = {
-                                    menuExpanded = false
-                                    if (isFollowing) {
-                                        onUnfollow(friend.uid)
-                                    } else {
-                                        onFollow(friend.uid)
-                                    }
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Unfriend") },
-                                onClick = {
-                                    menuExpanded = false
-                                    onUnfriend(friend.uid)
-                                }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Block") },
-                                onClick = {
-                                    menuExpanded = false
-                                    onBlock(friend.uid)
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-            Divider()
-        }
-    }
-}
-
-@Composable
-private fun FriendAvatar(
-    name: String,
-    photoUrl: String?
-) {
-    val context = LocalContext.current
-
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .clip(CircleShape)
-            .background(
-                brush = Brush.linearGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.primary,
-                        MaterialTheme.colorScheme.secondary
-                    )
-                )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        if (!photoUrl.isNullOrBlank()) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(photoUrl)
-                    .crossfade(true)
-                    .build(),
-                contentDescription = name
-            )
-        } else {
-            Text(
-                text = name.firstOrNull()?.uppercase() ?: "G",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimary,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-@Composable
-private fun RequestsTab(
-    requests: List<FriendRequestItem>,
-    onAccept: (String) -> Unit,
-    onReject: (String) -> Unit
-) {
-    if (requests.isEmpty()) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("You have no friend requests.")
-        }
-        return
-    }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(8.dp)
-    ) {
-        items(requests, key = { it.fromUid }) { item ->
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Text(
-                    text = item.user.fullName.ifBlank { "User" },
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontWeight = FontWeight.SemiBold
-                    )
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 4.dp)
-                ) {
-                    Button(onClick = { onAccept(item.fromUid) }) {
-                        Text("Confirm")
-                    }
-                    OutlinedButton(onClick = { onReject(item.fromUid) }) {
-                        Text("Decline")
-                    }
-                }
-            }
-            Divider()
-        }
-    }
-}
-
-@Composable
-private fun SuggestionsTab(
-    suggestions: List<FriendUserSummary>,
-    outgoingRequestIds: Set<String>,
-    friends: List<FriendUserSummary>,
-    mutualCounts: Map<String, Int>,
-    onConfirm: (String) -> Unit,
-    onDecline: (String) -> Unit
-) {
-    if (suggestions.isEmpty()) {
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("No suggestions yet. New users will appear here.")
-        }
-        return
-    }
-
-    val friendIds = remember(friends) { friends.map { it.uid }.toSet() }
-
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(8.dp)
-    ) {
-        items(suggestions, key = { it.uid }) { user ->
-            val isFriend = friendIds.contains(user.uid)
-            val hasRequested = outgoingRequestIds.contains(user.uid)
-            val mutual = mutualCounts[user.uid] ?: 0
-
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp)
-            ) {
-                Text(
-                    text = user.fullName,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontWeight = FontWeight.SemiBold
-                    )
-                )
-
-                if (mutual > 0) {
-                    Text(
-                        text = if (mutual == 1) "1 mutual friend" else "$mutual mutual friends",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 4.dp)
-                ) {
-                    when {
-                        isFriend -> {
-                            OutlinedButton(onClick = {}, enabled = false) {
-                                Text("Friends")
-                            }
-                        }
-
-                        hasRequested -> {
-                            OutlinedButton(onClick = {}, enabled = false) {
-                                Text("Requested")
-                            }
-                        }
-
-                        else -> {
-                            Button(onClick = { onConfirm(user.uid) }) {
-                                Text("Confirm")
-                            }
-                            OutlinedButton(onClick = { onDecline(user.uid) }) {
-                                Text("Decline")
-                            }
-                        }
-                    }
-                }
-            }
-            Divider()
-        }
-    }
-}
-
-@Composable
-private fun SearchTab(
-    uiState: FriendsUiState,
-    onQueryChange: (String) -> Unit,
-    onSendRequest: (String) -> Unit,
-    outgoingRequestIds: Set<String>,
-    friends: List<FriendUserSummary>
-) {
-    val friendIds = remember(friends) { friends.map { it.uid }.toSet() }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp)
-    ) {
-        OutlinedTextField(
-            value = uiState.searchQuery,
-            onValueChange = onQueryChange,
-            label = { Text("Search by name, email, or phone") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        when {
-            uiState.isSearchLoading -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    CircularProgressIndicator()
-                }
-            }
-
-            uiState.searchQuery.trim().length < 3 -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("No results yet. Enter at least 3 characters.")
-                }
-            }
-
-            uiState.searchResults.isEmpty() -> {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("No users found.")
-                }
-            }
-
-            else -> {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 8.dp)
-                ) {
-                    items(uiState.searchResults, key = { it.uid }) { user ->
-                        val isFriend = friendIds.contains(user.uid)
-                        val hasRequested = outgoingRequestIds.contains(user.uid)
-
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 8.dp)
-                        ) {
+                        // ✅ Add this hint UNDER the name, still inside the Column
+                        if (selectionMode && isDisabled) {
                             Text(
-                                text = user.fullName,
-                                style = MaterialTheme.typography.bodyLarge.copy(
-                                    fontWeight = FontWeight.SemiBold
-                                )
+                                text = "Already in group",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
+                        }
+                    }
 
-                            val subtitleParts = listOfNotNull(
-                                user.email,
-                                user.phone
-                            )
-                            if (subtitleParts.isNotEmpty()) {
-                                Text(
-                                    text = subtitleParts.joinToString(" · "),
-                                    style = MaterialTheme.typography.bodySmall
+// ✅ Checkbox stays OUTSIDE the Column, exactly like your snippet
+                    if (selectionMode) {
+                        Checkbox(
+                            checked = isSelected || isDisabled,
+                            enabled = !isDisabled,
+                            onCheckedChange = {
+                                if (!isDisabled) onToggleSelect(friend.uid)
+                            }
+                        )
+                    }
+
+                    else {
+                        Box {
+                            IconButton(onClick = { menuExpanded = true }) {
+                                Icon(
+                                    imageVector = Icons.Default.MoreVert,
+                                    contentDescription = "More"
                                 )
                             }
 
-                            Row(
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                modifier = Modifier.padding(top = 4.dp)
+                            val isFollowing = followingIds.contains(friend.uid)
+
+                            DropdownMenu(
+                                expanded = menuExpanded,
+                                onDismissRequest = { menuExpanded = false }
                             ) {
-                                when {
-                                    isFriend -> {
-                                        OutlinedButton(onClick = {}, enabled = false) {
-                                            Text("Friends")
+                                DropdownMenuItem(
+                                    text = { Text("View profile") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onViewProfile(friend.uid)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Message") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onMessage(friend.uid)
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(if (isFollowing) "Unfollow" else "Follow")
+                                    },
+                                    onClick = {
+                                        menuExpanded = false
+                                        if (isFollowing) {
+                                            onUnfollow(friend.uid)
+                                        } else {
+                                            onFollow(friend.uid)
                                         }
                                     }
-
-                                    hasRequested -> {
-                                        OutlinedButton(onClick = {}, enabled = false) {
-                                            Text("Requested")
-                                        }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Unfriend") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onUnfriend(friend.uid)
                                     }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Block") },
+                                    onClick = {
+                                        menuExpanded = false
+                                        onBlock(friend.uid)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                Divider()
+            }
+        }
+    }
+}
+    @Composable
+    private fun FriendAvatar(
+        name: String,
+        photoUrl: String?
+    ) {
+        val context = LocalContext.current
 
-                                    else -> {
-                                        Button(onClick = { onSendRequest(user.uid) }) {
-                                            Text("Add friend")
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(
+                    brush = Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary,
+                            MaterialTheme.colorScheme.secondary
+                        )
+                    )
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            if (!photoUrl.isNullOrBlank()) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(photoUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = name
+                )
+            } else {
+                Text(
+                    text = name.firstOrNull()?.uppercase() ?: "G",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun RequestsTab(
+        requests: List<FriendRequestItem>,
+        onAccept: (String) -> Unit,
+        onReject: (String) -> Unit
+    ) {
+        if (requests.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("You have no friend requests.")
+            }
+            return
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(8.dp)
+        ) {
+            items(requests, key = { it.fromUid }) { item ->
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        text = item.user.fullName.ifBlank { "User" },
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        Button(onClick = { onAccept(item.fromUid) }) {
+                            Text("Confirm")
+                        }
+                        OutlinedButton(onClick = { onReject(item.fromUid) }) {
+                            Text("Decline")
+                        }
+                    }
+                }
+                Divider()
+            }
+        }
+    }
+
+    @Composable
+    private fun SuggestionsTab(
+        suggestions: List<FriendUserSummary>,
+        outgoingRequestIds: Set<String>,
+        friends: List<FriendUserSummary>,
+        mutualCounts: Map<String, Int>,
+        onConfirm: (String) -> Unit,
+        onDecline: (String) -> Unit,
+        isInnerCircle: Boolean
+    ) {
+
+
+        if (suggestions.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
+            ) {
+                Text("No suggestions yet. New users will appear here.")
+            }
+            return
+        }
+
+        val friendIds = remember(friends) { friends.map { it.uid }.toSet() }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(8.dp)
+        ) {
+            items(suggestions, key = { it.uid }) { user ->
+                val isFriend = friendIds.contains(user.uid)
+                val hasRequested = outgoingRequestIds.contains(user.uid)
+                val mutual = mutualCounts[user.uid] ?: 0
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 8.dp)
+                ) {
+                    Text(
+                        text = user.fullName,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    )
+
+                    if (mutual > 0) {
+                        Text(
+                            text = if (mutual == 1) "1 mutual friend" else "$mutual mutual friends",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(top = 4.dp)
+                    ) {
+                        when {
+                            isFriend -> {
+                                OutlinedButton(onClick = {}, enabled = false) {
+                                    Text(if (isInnerCircle) "Connections" else "Friends")
+                                }
+                            }
+
+                            hasRequested -> {
+                                OutlinedButton(onClick = {}, enabled = false) {
+                                    Text("Requested")
+                                }
+                            }
+
+                            else -> {
+                                Button(onClick = { onConfirm(user.uid) }) {
+                                    Text("Confirm")
+                                }
+                                OutlinedButton(onClick = { onDecline(user.uid) }) {
+                                    Text("Decline")
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+            }
+        }
+    }
+
+    @Composable
+    private fun SearchTab(
+        uiState: FriendsUiState,
+        onQueryChange: (String) -> Unit,
+        onSendRequest: (String) -> Unit,
+        outgoingRequestIds: Set<String>,
+        friends: List<FriendUserSummary>,
+        isInnerCircle: Boolean
+    ) {
+
+        val friendIds = remember(friends) { friends.map { it.uid }.toSet() }
+
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp)
+        ) {
+            OutlinedTextField(
+                value = uiState.searchQuery,
+                onValueChange = onQueryChange,
+                label = { Text("Search by name, email, or phone") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            when {
+                uiState.isSearchLoading -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                }
+
+                uiState.searchQuery.trim().length < 3 -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No results yet. Enter at least 3 characters.")
+                    }
+                }
+
+                uiState.searchResults.isEmpty() -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No users found.")
+                    }
+                }
+
+                else -> {
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(bottom = 8.dp)
+                    ) {
+                        items(uiState.searchResults, key = { it.uid }) { user ->
+                            val isFriend = friendIds.contains(user.uid)
+                            val hasRequested = outgoingRequestIds.contains(user.uid)
+
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = user.fullName,
+                                    style = MaterialTheme.typography.bodyLarge.copy(
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                )
+
+                                val subtitleParts = listOfNotNull(
+                                    user.email,
+                                    user.phone
+                                )
+                                if (subtitleParts.isNotEmpty()) {
+                                    Text(
+                                        text = subtitleParts.joinToString(" · "),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+
+                                Row(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    modifier = Modifier.padding(top = 4.dp)
+                                ) {
+                                    when {
+                                        isFriend -> {
+                                            OutlinedButton(onClick = {}, enabled = false) {
+                                                Text(if (isInnerCircle) "Connections" else "Friends")
+                                            }
+                                        }
+
+                                        hasRequested -> {
+                                            OutlinedButton(onClick = {}, enabled = false) {
+                                                Text("Requested")
+                                            }
+                                        }
+
+                                        else -> {
+                                            Button(onClick = { onSendRequest(user.uid) }) {
+                                                Text("Add friend")
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Divider()
                         }
-                        Divider()
                     }
                 }
             }
         }
     }
-}

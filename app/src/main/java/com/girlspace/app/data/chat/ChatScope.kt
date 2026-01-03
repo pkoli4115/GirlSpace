@@ -1,4 +1,6 @@
 package com.girlspace.app.data.chat
 
-class ChatScope {
+enum class ChatScope {
+    PUBLIC,
+    INNER_CIRCLE
 }

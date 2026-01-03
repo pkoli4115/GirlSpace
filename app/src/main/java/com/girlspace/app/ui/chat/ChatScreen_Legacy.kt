@@ -95,7 +95,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
+import com.girlspace.app.ui.common.findActivity
 private enum class PermissionType {
     CAMERA, AUDIO, STORAGE
 }
@@ -124,7 +124,8 @@ fun ChatScreen_Legacy(
     val lastSeenText by vm.lastSeenText.collectAsState()
 
     val context = LocalContext.current
-    val activity = context as? Activity
+    val activity = context.findActivity()
+
     val currentUid = FirebaseAuth.getInstance().currentUser?.uid
 
     val reactionPlayer = remember {

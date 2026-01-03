@@ -1,4 +1,7 @@
 package com.girlspace.app.ui.feed
+import com.girlspace.app.core.SoftLaunchPrefs
+import kotlinx.coroutines.flow.first
+
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.RadioButton
@@ -149,6 +152,23 @@ fun FeedScreen(
     val currentUser = auth.currentUser
     val firestore = remember { FirebaseFirestore.getInstance() }
     val context = LocalContext.current
+    val snackbarHostState = remember { androidx.compose.material3.SnackbarHostState() }
+
+    // Show the "gradually opening features" message once (first upload attempt)
+    LaunchedEffect(isCreatePostOpen) {
+        if (!isCreatePostOpen) return@LaunchedEffect
+        val seen = SoftLaunchPrefs.seenUploadBannerFlow(context).first()
+        if (!seen) {
+            snackbarHostState.showSnackbar(
+                message =
+                    "🌸 Togetherly is opening features gradually to keep the community safe.\n" +
+                            "Short videos & limited photos are available now.\n" +
+                            "More features unlock as the community grows 💗"
+            )
+            SoftLaunchPrefs.markUploadBannerSeen(context)
+        }
+    }
+
 
     val isMuted by videoVm.muted.collectAsState()
     val activeId by videoVm.activePostId.collectAsState()
@@ -623,20 +643,17 @@ fun FeedScreen(
             )
         }
 
-        if (premiumRequired) {
-            AlertDialog(
-                onDismissRequest = { vm.clearPremiumRequired() },
-                confirmButton = { TextButton(onClick = { vm.clearPremiumRequired() }) { Text("OK") } },
-                title = { Text("Premium feature") },
-                text = {
-                    Text(
-                        "Your current plan allows up to $maxImages images per post. " +
-                                "Please upgrade your plan in Menu → Manage Subscriptions " +
-                                "to attach more images."
-                    )
-                }
-            )
+        LaunchedEffect(premiumRequired, maxImages) {
+            if (premiumRequired) {
+                snackbarHostState.showSnackbar(
+                    "🔒 Safe Launch Mode\n" +
+                            "You can add up to $maxImages photos per post right now.\n" +
+                            "Thanks for helping keep Togetherly safe 🌷"
+                )
+                vm.clearPremiumRequired()
+            }
         }
+
 
         if (isCreatePostOpen) {
             Surface(
@@ -697,6 +714,14 @@ fun FeedScreen(
                 Icon(imageVector = Icons.Filled.ArrowUpward, contentDescription = "Scroll to top")
             }
         }
+        // ✅ SnackbarHost (must be rendered once per screen)
+        androidx.compose.material3.SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = 90.dp) // keeps it above bottom FAB / nav
+        )
+
     }
 }
 
@@ -1529,7 +1554,10 @@ fun CreatePostScreen(
     ) { uris ->
         if (uris.size > maxImagesAllowed) {
             selectedImages = uris.take(maxImagesAllowed)
-            limitWarning = "Your current plan allows up to $maxImagesAllowed images per post. Extra images were ignored."
+            limitWarning =
+                "🔒 Safe Launch Mode\n" +
+                        "You can add up to $maxImagesAllowed photos per post right now.\n" +
+                        "Thanks for helping keep Togetherly safe 🌷"
         } else {
             selectedImages = uris
             limitWarning = null
@@ -1607,7 +1635,10 @@ fun CreatePostScreen(
                 TextButton(
                     onClick = {
                         if (selectedImages.size > maxImagesAllowed) {
-                            limitWarning = "Your current plan allows up to $maxImagesAllowed images per post."
+                            limitWarning =
+                                "🔒 Safe Launch Mode\n" +
+                                        "You can add up to $maxImagesAllowed photos per post right now.\n" +
+                                        "Extra photos were ignored. Thanks for helping keep Togetherly safe 🌷"
                         } else {
                             onPost(text, selectedImages)
                         }
@@ -1616,7 +1647,7 @@ fun CreatePostScreen(
             }
 
             Text(
-                text = "Your current plan allows up to $maxImagesAllowed images per post.",
+                text = "🔒 Safe Launch Mode: Up to $maxImagesAllowed photos per post during launch.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

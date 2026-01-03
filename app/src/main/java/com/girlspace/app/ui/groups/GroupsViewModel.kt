@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.groups
+import com.girlspace.app.data.groups.GroupsScope
 
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -27,6 +28,7 @@ class GroupsViewModel : ViewModel() {
 
     private val _isLoading: MutableStateFlow<Boolean> = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
+    private var scope: GroupsScope = GroupsScope.PUBLIC
 
     private val _errorMessage: MutableStateFlow<String?> = MutableStateFlow(null)
     val errorMessage: StateFlow<String?> = _errorMessage
@@ -44,6 +46,11 @@ class GroupsViewModel : ViewModel() {
     // -------------------------------------------------------------------------
     // LOAD & OBSERVE GROUPS
     // -------------------------------------------------------------------------
+    fun setScope(newScope: GroupsScope) {
+        if (scope == newScope) return
+        scope = newScope
+        observeGroups() // restart listener with new collection
+    }
 
     private fun observeGroups() {
         val uid: String? = auth.currentUser?.uid
@@ -55,9 +62,9 @@ class GroupsViewModel : ViewModel() {
         _isLoading.value = true
 
         listener?.remove()
-        listener = firestore.collection("groups")
+        listener = groupsCollection()
             .addSnapshotListener { snapshot, e ->
-                if (e != null) {
+            if (e != null) {
                     Log.e("GirlSpace", "Groups listen failed", e)
                     _isLoading.value = false
                     _errorMessage.value =
@@ -96,7 +103,7 @@ class GroupsViewModel : ViewModel() {
             }
     }
 
-    // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
     // PUBLIC HELPERS
     // -------------------------------------------------------------------------
 
@@ -171,9 +178,10 @@ class GroupsViewModel : ViewModel() {
                     "memberCount" to 1L
                 )
 
-                firestore.collection("groups")
+                groupsCollection()
                     .add(groupData)
                     .await()
+
 
             } catch (e: Exception) {
                 Log.e("GirlSpace", "createGroup failed", e)
@@ -198,7 +206,7 @@ class GroupsViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 _isLoading.value = true
-                val ref = firestore.collection("groups").document(group.id)
+                val ref = groupsCollection().document(group.id)
 
                 firestore.runTransaction { tx ->
                     val snap = tx.get(ref)
@@ -237,7 +245,7 @@ class GroupsViewModel : ViewModel() {
         viewModelScope.launch {
             try {
                 _isLoading.value = true
-                val ref = firestore.collection("groups").document(group.id)
+                val ref = groupsCollection().document(group.id)
 
                 firestore.runTransaction { tx ->
                     val snap = tx.get(ref)
@@ -265,9 +273,126 @@ class GroupsViewModel : ViewModel() {
             }
         }
     }
+    private fun groupsCollection() =
+        if (scope == GroupsScope.INNER_CIRCLE)
+            firestore.collection("ic_groups")
+        else
+            firestore.collection("groups")
+
+    /**
+     * Add members to a group/community (scope-aware because groupsCollection() is scope-aware).
+     * Safe merge: keeps existing members, adds new ones, updates memberCount.
+     */
+    fun addMembersToGroup(groupId: String, memberIds: Set<String>) {
+        val uid: String? = auth.currentUser?.uid
+        if (uid == null) {
+            _errorMessage.value = "You must be logged in."
+            return
+        }
+        if (memberIds.isEmpty()) return
+
+        viewModelScope.launch {
+            try {
+                _isLoading.value = true
+                val ref = groupsCollection().document(groupId)
+
+                firestore.runTransaction { tx ->
+                    val snap = tx.get(ref)
+
+                    val membersRaw: List<*> =
+                        (snap.get("members") as? List<*>) ?: emptyList<Any?>()
+                    val members: MutableSet<String> =
+                        membersRaw.filterIsInstance<String>().toMutableSet()
+
+                    // Always ensure creator/current user stays a member
+                    members.add(uid)
+
+                    // Merge selected
+                    members.addAll(memberIds)
+
+                    tx.update(
+                        ref,
+                        mapOf(
+                            "members" to members.toList(),
+                            "memberCount" to members.size.toLong()
+                        )
+                    )
+                }.await()
+            } catch (e: Exception) {
+                Log.e("GirlSpace", "addMembersToGroup failed", e)
+                _errorMessage.value = e.localizedMessage ?: "Failed to add members."
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+    /**
+     * Owner/admin edit-members flow:
+     * Replaces group members with finalMemberIds (plus safety rules).
+     * - scope-aware (groups vs ic_groups)
+     * - enforces current user remains a member
+     * - updates memberCount
+     */
+    fun updateGroupMembers(groupId: String, finalMemberIds: Set<String>) {
+        val uid: String? = auth.currentUser?.uid
+        if (uid == null) {
+            _errorMessage.value = "You must be logged in."
+            return
+        }
+
+        viewModelScope.launch {
+            try {
+                _isLoading.value = true
+                val ref = groupsCollection().document(groupId)
+
+                firestore.runTransaction { tx ->
+                    val snap = tx.get(ref)
+
+                    val createdBy = snap.getString("createdBy") ?: ""
+                    val membersRaw: List<*> = (snap.get("members") as? List<*>) ?: emptyList<Any?>()
+                    val existing: Set<String> = membersRaw.filterIsInstance<String>().toSet()
+
+                    // Safety:
+                    // - never remove the owner/creator
+                    // - never remove the current user (acting admin)
+                    // - never allow empty members
+                    val locked = setOf(createdBy, uid).filter { it.isNotBlank() }.toSet()
+
+                    val merged = (finalMemberIds + locked).filter { it.isNotBlank() }.toSet()
+
+                    // if somehow empty, keep existing
+                    val safeFinal = if (merged.isEmpty()) existing else merged
+
+                    tx.update(
+                        ref,
+                        mapOf(
+                            "members" to safeFinal.toList(),
+                            "memberCount" to safeFinal.size.toLong()
+                        )
+                    )
+                }.await()
+            } catch (e: Exception) {
+                Log.e("GirlSpace", "updateGroupMembers failed", e)
+                _errorMessage.value = e.localizedMessage ?: "Failed to update members."
+            } finally {
+                _isLoading.value = false
+            }
+        }
+    }
+
+    suspend fun getGroupMemberIds(groupId: String): Set<String> {
+        val snap = groupsCollection()
+            .document(groupId)
+            .get()
+            .await()
+
+        val membersRaw = snap.get("members") as? List<*> ?: emptyList<Any?>()
+        return membersRaw.filterIsInstance<String>().toSet()
+    }
 
     override fun onCleared() {
         super.onCleared()
         listener?.remove()
     }
+
 }

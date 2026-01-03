@@ -1,4 +1,5 @@
 package com.girlspace.app.ui.splash
+import com.google.firebase.auth.FirebaseAuth
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -33,8 +34,10 @@ import kotlinx.coroutines.delay
 fun SplashScreen(
     firstLaunchDone: Boolean,
     onShowOnboarding: () -> Unit,
-    onShowLogin: () -> Unit
-) {
+    onShowLogin: () -> Unit,
+    onShowHome: () -> Unit
+)
+ {
     val startAnim = remember { mutableStateOf(false) }
     val alpha by animateFloatAsState(
         targetValue = if (startAnim.value) 1f else 0f,
@@ -48,18 +51,32 @@ fun SplashScreen(
         label = "splashScale"
     )
 
-    LaunchedEffect(Unit) {
-        startAnim.value = true
-        // Show branded splash before navigating
-        delay(2000L)
-        if (firstLaunchDone) {
-            onShowLogin()
-        } else {
-            onShowOnboarding()
-        }
-    }
+     LaunchedEffect(Unit) {
+         startAnim.value = true
+         delay(2000L)
 
-    Box(
+         val user = FirebaseAuth.getInstance().currentUser
+
+         when {
+             user != null -> {
+                 // ✅ User already logged in → go straight to Home
+                 onShowHome()
+             }
+
+             firstLaunchDone -> {
+                 // ❌ Not logged in, but has opened app before
+                 onShowLogin()
+             }
+
+             else -> {
+                 // 🆕 First-time user
+                 onShowOnboarding()
+             }
+         }
+     }
+
+
+     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(

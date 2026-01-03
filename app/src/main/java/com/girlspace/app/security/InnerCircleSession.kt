@@ -1,4 +1,20 @@
 package com.girlspace.app.security
 
-class InnerCircleSession {
+/**
+ * Inner Circle in-memory session lock.
+ * Reset on app restart / logout.
+ */
+object InnerCircleSession {
+
+    private var unlocked: Boolean = false
+
+    fun isUnlocked(): Boolean = unlocked
+
+    fun unlock() {
+        unlocked = true
+    }
+
+    fun lock() {
+        unlocked = false
+    }
 }

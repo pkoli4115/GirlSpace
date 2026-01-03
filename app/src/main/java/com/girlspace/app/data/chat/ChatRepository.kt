@@ -8,6 +8,9 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.tasks.await
 import java.util.Date
+import com.girlspace.app.data.chat.ChatScope
+import com.google.firebase.firestore.SetOptions
+import com.google.firebase.firestore.FieldValue
 
 class ChatRepository(
     private val auth: FirebaseAuth = FirebaseAuth.getInstance(),
@@ -15,8 +18,12 @@ class ChatRepository(
 ) {
 
     // IMPORTANT: match your Firestore collection names
-    private val threadsRef = firestore.collection("chatThreads")     // <- SAME as your existing
-    private val messagesRef = firestore.collection("chat_messages")  // <- SAME as your existing
+// IMPORTANT: match your Firestore collection names
+    private fun threadsRef(scope: ChatScope) =
+        firestore.collection(if (scope == ChatScope.INNER_CIRCLE) "ic_chatThreads" else "chatThreads")
+
+    private fun messagesRef(scope: ChatScope) =
+        firestore.collection(if (scope == ChatScope.INNER_CIRCLE) "ic_chat_messages" else "chat_messages")
 
     private fun currentUid(): String = auth.currentUser?.uid ?: ""
 
@@ -66,7 +73,10 @@ class ChatRepository(
     // -------------------------------------------------------------------------
     // THREADS
     // -------------------------------------------------------------------------
-    fun observeThreads(onUpdate: (List<ChatThread>) -> Unit): ListenerRegistration {
+    fun observeThreads(
+        scope: ChatScope = ChatScope.PUBLIC,
+        onUpdate: (List<ChatThread>) -> Unit
+    ): ListenerRegistration {
         val uid = currentUid()
         if (uid.isEmpty()) {
             onUpdate(emptyList())
@@ -74,7 +84,7 @@ class ChatRepository(
             return firestore.collection("dummy").addSnapshotListener { _, _ -> }
         }
 
-        return threadsRef
+        return threadsRef(scope)
             .whereArrayContains("participants", uid)
             .addSnapshotListener { snap, e ->
                 if (e != null) {
@@ -127,54 +137,65 @@ class ChatRepository(
      * ✅ Mark a thread as read for current user (WhatsApp style):
      * sets chatThreads/{threadId}.unread_{uid} = 0
      */
-    suspend fun markThreadRead(threadId: String) {
-        val uid = currentUid()
-        if (uid.isBlank()) return
+    suspend fun markThreadRead(
+        threadId: String,
+        uid: String,
+        scope: ChatScope = ChatScope.PUBLIC
+    ) {
+        val threads = firestore.collection(
+            if (scope == ChatScope.INNER_CIRCLE) "ic_chatThreads" else "chatThreads"
+        )
 
-        try {
-            threadsRef.document(threadId)
-                .update("unread_$uid", 0L)
-                .await()
-        } catch (e: Exception) {
-            Log.w("ChatRepository", "markThreadRead failed", e)
-        }
+        threads.document(threadId)
+            .update("unread_$uid", 0L)
+            .await()
     }
+
 
     /**
      * 📌 Pin/unpin for current user only.
      * Stores a per-user field: pinnedAt_<uid> = millis (or 0).
      */
-    suspend fun setThreadPinned(threadId: String, pinned: Boolean) {
-        val uid = currentUid()
-        if (uid.isBlank()) return
+    suspend fun setThreadPinned(
+        threadId: String,
+        uid: String,
+        pinned: Boolean,
+        scope: ChatScope = ChatScope.PUBLIC
+    ) {
+        val threads = firestore.collection(
+            if (scope == ChatScope.INNER_CIRCLE) "ic_chatThreads" else "chatThreads"
+        )
 
         val field = "pinnedAt_$uid"
-        val value = if (pinned) System.currentTimeMillis() else 0L
+        val value: Any? = if (pinned) System.currentTimeMillis() else null
 
-        try {
-            threadsRef.document(threadId)
-                .update(field, value)
-                .await()
-        } catch (e: Exception) {
-            Log.w("ChatRepository", "setThreadPinned failed", e)
+        // If unpin -> delete field; else set millis
+        if (pinned) {
+            threads.document(threadId).set(mapOf(field to value), SetOptions.merge()).await()
+        } else {
+            threads.document(threadId).update(field, FieldValue.delete()).await()
         }
     }
+
 
     /**
      * 🗑 Delete thread for current user only.
      * Adds uid to chatThreads/{threadId}.deletedFor array
      */
-    suspend fun deleteThreadForMe(threadId: String) {
-        val uid = currentUid()
+    suspend fun deleteThreadForMe(
+        threadId: String,
+        uid: String,
+        scope: ChatScope = ChatScope.PUBLIC
+    ) {
         if (uid.isBlank()) return
 
         try {
             firestore.runTransaction { tx ->
-                val ref = threadsRef.document(threadId)
+                val ref = threadsRef(scope).document(threadId)
                 val snap = tx.get(ref)
                 if (!snap.exists()) return@runTransaction
 
-                val current = (snap.get("deletedFor") as? List<String>) ?: emptyList()
+                val current = (snap.get("deletedFor") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
                 if (current.contains(uid)) return@runTransaction
 
                 tx.update(ref, "deletedFor", current + uid)
@@ -182,14 +203,19 @@ class ChatRepository(
             }.await()
         } catch (e: Exception) {
             Log.w("ChatRepository", "deleteThreadForMe failed", e)
+            throw e // optional: let VM show error
         }
     }
+
 
     /**
      * Start or get an existing thread between current user and user with [email].
      * Requires that /users/{uid}.email == [email].
      */
-    suspend fun startOrGetThreadByEmail(email: String): ChatThread {
+    suspend fun startOrGetThreadByEmail(
+        email: String,
+        scope: ChatScope = ChatScope.PUBLIC
+    ): ChatThread {
         val myId = currentUid()
         val myName = currentName()
 
@@ -212,7 +238,7 @@ class ChatRepository(
             ?: "GirlSpace user"
 
         // 2) Check if thread already exists (A-B or B-A)
-        val forward = threadsRef
+        val forward = threadsRef(scope)
             .whereEqualTo("userA", myId)
             .whereEqualTo("userB", otherId)
             .get()
@@ -223,11 +249,12 @@ class ChatRepository(
             return doc.toChatThread()
         }
 
-        val reverse = threadsRef
+        val reverse = threadsRef(scope)
             .whereEqualTo("userA", otherId)
             .whereEqualTo("userB", myId)
             .get()
             .await()
+
 
         if (!reverse.isEmpty) {
             val doc = reverse.documents.first()
@@ -236,7 +263,7 @@ class ChatRepository(
 
         // 3) Create new thread
         val now = System.currentTimeMillis()
-        val newDoc = threadsRef.document()
+        val newDoc = threadsRef(scope).document()
 
         val data = mapOf(
             "userA" to myId,
@@ -270,10 +297,12 @@ class ChatRepository(
 
     fun observeMessages(
         threadId: String,
+        scope: ChatScope = ChatScope.PUBLIC,
         onUpdate: (List<ChatMessage>) -> Unit
     ): ListenerRegistration {
 
-        return messagesRef
+
+        return messagesRef(scope)
             .whereEqualTo("threadId", threadId)
             .addSnapshotListener { snap, e ->
                 if (e != null) {
@@ -299,6 +328,7 @@ class ChatRepository(
     suspend fun sendMessage(
         threadId: String,
         text: String,
+        scope: ChatScope = ChatScope.PUBLIC,
         mediaUrl: String? = null,
         mediaType: String? = null,
         replyTo: String? = null,
@@ -310,7 +340,7 @@ class ChatRepository(
         val name = currentName() // suspend-safe + real name
         if (uid.isEmpty()) throw IllegalStateException("Not logged in")
 
-        val msgDoc = messagesRef.document()
+        val msgDoc = messagesRef(scope).document()
         val now = Timestamp.now()
 
         val msgData = mutableMapOf<String, Any?>(
@@ -348,7 +378,7 @@ class ChatRepository(
         }
 
         // Keep your original long timestamp update (Cloud Function will also set serverTimestamp)
-        threadsRef.document(threadId).update(
+        threadsRef(scope).document(threadId).update(
             mapOf(
                 "lastMessage" to preview,
                 "lastTimestamp" to System.currentTimeMillis()
@@ -362,10 +392,14 @@ class ChatRepository(
 
     suspend fun addReaction(
         messageId: String,
-        userId: String,
-        emoji: String
+        emoji: String,
+        scope: ChatScope = ChatScope.PUBLIC
     ) {
-        val msgRef = messagesRef.document(messageId)
+        val uid = currentUid()
+        if (uid.isBlank()) return
+
+        val msgRef = messagesRef(scope).document(messageId)
+
 
         firestore.runTransaction { tx ->
             val snap = tx.get(msgRef)
@@ -375,11 +409,12 @@ class ChatRepository(
             val current = snap.get("reactions") as? Map<String, String> ?: emptyMap()
             val updated = current.toMutableMap()
 
-            if (updated[userId] == emoji) {
-                updated.remove(userId)
+            if (updated[uid] == emoji) {
+                updated.remove(uid)
             } else {
-                updated[userId] = emoji
+                updated[uid] = emoji
             }
+
 
             tx.update(msgRef, "reactions", updated as Map<String, Any>)
         }.await()
@@ -411,7 +446,8 @@ class ChatRepository(
             val legacyDeleted = rawText == "This message was deleted"
 
             val deletedForAllFlag = getBoolean("deletedForAll") ?: legacyDeleted
-            val deletedForList = (get("deletedFor") as? List<String>) ?: emptyList()
+            val deletedForList =
+                (get("deletedFor") as? List<*>)?.filterIsInstance<String>() ?: emptyList()
 
             val isDeletedCompletely = deletedForAllFlag
 

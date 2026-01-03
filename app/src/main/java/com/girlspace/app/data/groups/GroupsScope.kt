@@ -1,4 +1,6 @@
 package com.girlspace.app.data.groups
 
-class GroupsScope {
+enum class GroupsScope {
+    PUBLIC,
+    INNER_CIRCLE
 }

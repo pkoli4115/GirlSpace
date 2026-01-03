@@ -1,4 +1,5 @@
 package com.girlspace.app.data.friends
+import com.girlspace.app.data.friends.FriendScope
 
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FieldValue
@@ -47,18 +48,34 @@ class FriendRepository(
     }
 
     private fun usersCollection() = db.collection("users")
+    private fun friendsRoot(scope: FriendScope) =
+        if (scope == FriendScope.INNER_CIRCLE) "ic_friends" else "friends"
 
-    private fun friendsCollection(uid: String = currentUid()) =
-        db.collection("friends").document(uid).collection("list")
+    private fun requestsRoot(scope: FriendScope) =
+        if (scope == FriendScope.INNER_CIRCLE) "ic_friend_requests" else "friend_requests"
 
-    private fun incomingRequestsCollection(uid: String = currentUid()) =
-        db.collection("friend_requests").document(uid).collection("incoming")
+    private fun blockedRoot(scope: FriendScope) =
+        if (scope == FriendScope.INNER_CIRCLE) "ic_blocked_users" else "blocked_users"
 
-    private fun outgoingRequestsCollection(uid: String = currentUid()) =
-        db.collection("friend_requests").document(uid).collection("outgoing")
+    private fun friendsCollection(
+        uid: String = currentUid(),
+        scope: FriendScope = FriendScope.PUBLIC
+    ) = db.collection(friendsRoot(scope)).document(uid).collection("list")
 
-    private fun blockedUsersCollection(uid: String = currentUid()) =
-        db.collection("blocked_users").document(uid).collection(uid)
+    private fun incomingRequestsCollection(
+        uid: String = currentUid(),
+        scope: FriendScope = FriendScope.PUBLIC
+    ) = db.collection(requestsRoot(scope)).document(uid).collection("incoming")
+
+    private fun outgoingRequestsCollection(
+        uid: String = currentUid(),
+        scope: FriendScope = FriendScope.PUBLIC
+    ) = db.collection(requestsRoot(scope)).document(uid).collection("outgoing")
+
+    private fun blockedUsersCollection(
+        uid: String = currentUid(),
+        scope: FriendScope = FriendScope.PUBLIC
+    ) = db.collection(blockedRoot(scope)).document(uid).collection(uid)
 
     // endregion
 
@@ -92,6 +109,109 @@ class FriendRepository(
         batch.set(incomingRef, dataIncoming)
         batch.set(outgoingRef, dataOutgoing)
         batch.commit().await()
+    }
+    suspend fun sendFriendRequest(toUid: String, scope: FriendScope) {
+        val fromUid = currentUid()
+        require(fromUid != toUid) { "Cannot send friend request to yourself" }
+        val now = System.currentTimeMillis()
+
+        val incomingRef = incomingRequestsCollection(toUid, scope).document(fromUid)
+        val outgoingRef = outgoingRequestsCollection(fromUid, scope).document(toUid)
+
+        val data = mapOf("fromUid" to fromUid, "toUid" to toUid, "createdAt" to now)
+
+        val batch = db.batch()
+        batch.set(incomingRef, data)
+        batch.set(outgoingRef, data)
+        batch.commit().await()
+    }
+
+    suspend fun cancelFriendRequest(toUid: String, scope: FriendScope) {
+        val fromUid = currentUid()
+        val incomingRef = incomingRequestsCollection(toUid, scope).document(fromUid)
+        val outgoingRef = outgoingRequestsCollection(fromUid, scope).document(toUid)
+
+        val batch = db.batch()
+        batch.delete(incomingRef)
+        batch.delete(outgoingRef)
+        batch.commit().await()
+    }
+
+    suspend fun rejectFriendRequest(fromUid: String, scope: FriendScope) {
+        val toUid = currentUid()
+
+        val incomingRef = incomingRequestsCollection(toUid, scope).document(fromUid)
+        val outgoingRef = outgoingRequestsCollection(fromUid, scope).document(toUid)
+
+        val batch = db.batch()
+        batch.delete(incomingRef)
+        batch.delete(outgoingRef)
+        batch.commit().await()
+    }
+
+    suspend fun acceptFriendRequest(fromUid: String, scope: FriendScope) {
+        val toUid = currentUid()
+        val now = System.currentTimeMillis()
+
+        val incomingRef = incomingRequestsCollection(toUid, scope).document(fromUid)
+        val outgoingRef = outgoingRequestsCollection(fromUid, scope).document(toUid)
+
+        val aFriendRef = friendsCollection(fromUid, scope).document(toUid)
+        val bFriendRef = friendsCollection(toUid, scope).document(fromUid)
+
+        val friendDataA = mapOf("friendUid" to toUid, "createdAt" to now, "lastInteractionAt" to now)
+        val friendDataB = mapOf("friendUid" to fromUid, "createdAt" to now, "lastInteractionAt" to now)
+
+        val batch = db.batch()
+        batch.set(aFriendRef, friendDataA)
+        batch.set(bFriendRef, friendDataB)
+        batch.delete(incomingRef)
+        batch.delete(outgoingRef)
+        batch.commit().await()
+    }
+
+    suspend fun unfriend(friendUid: String, scope: FriendScope) {
+        val uid = currentUid()
+        val myFriendRef = friendsCollection(uid, scope).document(friendUid)
+        val theirFriendRef = friendsCollection(friendUid, scope).document(uid)
+
+        val batch = db.batch()
+        batch.delete(myFriendRef)
+        batch.delete(theirFriendRef)
+        batch.commit().await()
+    }
+
+    suspend fun blockUser(targetUid: String, scope: FriendScope) {
+        val uid = currentUid()
+        val now = System.currentTimeMillis()
+
+        val blockRef = blockedUsersCollection(uid, scope).document(targetUid)
+
+        val myFriendRef = friendsCollection(uid, scope).document(targetUid)
+        val theirFriendRef = friendsCollection(targetUid, scope).document(uid)
+
+        val incomingMeFromThem = incomingRequestsCollection(uid, scope).document(targetUid)
+        val outgoingMeToThem = outgoingRequestsCollection(uid, scope).document(targetUid)
+        val incomingThemFromMe = incomingRequestsCollection(targetUid, scope).document(uid)
+        val outgoingThemToMe = outgoingRequestsCollection(targetUid, scope).document(uid)
+
+        val meDocRef = usersCollection().document(uid)
+
+        val batch = db.batch()
+        batch.set(blockRef, mapOf("blockedUid" to targetUid, "createdAt" to now))
+        batch.delete(myFriendRef)
+        batch.delete(theirFriendRef)
+        batch.delete(incomingMeFromThem)
+        batch.delete(outgoingMeToThem)
+        batch.delete(incomingThemFromMe)
+        batch.delete(outgoingThemToMe)
+        batch.update(meDocRef, "following", FieldValue.arrayRemove(targetUid))
+        batch.commit().await()
+    }
+
+    suspend fun unblockUser(targetUid: String, scope: FriendScope) {
+        val uid = currentUid()
+        blockedUsersCollection(uid, scope).document(targetUid).delete().await()
     }
 
     /**
@@ -290,6 +410,109 @@ class FriendRepository(
                     }
                     trySend(summaries).isSuccess
                 }
+            }
+
+        awaitClose { registration.remove() }
+    }
+    fun observeFriends(scope: FriendScope): Flow<List<FriendUserSummary>> = callbackFlow {
+        val uid = currentUid()
+
+        val registration = friendsCollection(uid, scope)
+            .orderBy("lastInteractionAt", Query.Direction.DESCENDING)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    trySend(emptyList()).isSuccess
+                    return@addSnapshotListener
+                }
+
+                val friendIds = snapshot?.documents?.mapNotNull { doc ->
+                    doc.getString("friendUid")
+                } ?: emptyList()
+
+                if (friendIds.isEmpty()) {
+                    trySend(emptyList()).isSuccess
+                    return@addSnapshotListener
+                }
+
+                GlobalScope.launch {
+                    val summaries = friendIds.mapNotNull { friendId ->
+                        try {
+                            val userSnap = usersCollection().document(friendId).get().await()
+                            if (!userSnap.exists()) return@mapNotNull null
+                            FriendUserSummary(
+                                uid = friendId,
+                                fullName = userSnap.getString("name")
+                                    ?: userSnap.getString("fullName")
+                                    ?: "",
+                                photoUrl = userSnap.getString("photoUrl")
+                            )
+                        } catch (_: Exception) {
+                            null
+                        }
+                    }
+                    trySend(summaries).isSuccess
+                }
+            }
+
+        awaitClose { registration.remove() }
+    }
+
+    fun observeIncomingRequests(scope: FriendScope): Flow<List<FriendRequestItem>> = callbackFlow {
+        val uid = currentUid()
+
+        val registration = incomingRequestsCollection(uid, scope)
+            .orderBy("createdAt", Query.Direction.DESCENDING)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    trySend(emptyList()).isSuccess
+                    return@addSnapshotListener
+                }
+
+                val requests = snapshot?.documents ?: emptyList()
+
+                GlobalScope.launch {
+                    val result = requests.mapNotNull { doc ->
+                        val fromUid = doc.getString("fromUid") ?: return@mapNotNull null
+                        val toUid = doc.getString("toUid") ?: uid
+                        val createdAt = doc.getLong("createdAt") ?: 0L
+
+                        val userSnap = try { usersCollection().document(fromUid).get().await() } catch (_: Exception) { null }
+                        val userSummary = if (userSnap != null && userSnap.exists()) {
+                            FriendUserSummary(
+                                uid = fromUid,
+                                fullName = userSnap.getString("name")
+                                    ?: userSnap.getString("fullName")
+                                    ?: "",
+                                photoUrl = userSnap.getString("photoUrl")
+                            )
+                        } else FriendUserSummary(uid = fromUid)
+
+                        FriendRequestItem(fromUid = fromUid, toUid = toUid, createdAt = createdAt, user = userSummary)
+                    }
+
+                    trySend(result).isSuccess
+                }
+            }
+
+        awaitClose { registration.remove() }
+    }
+
+    fun observeOutgoingRequests(scope: FriendScope): Flow<Set<String>> = callbackFlow {
+        val uid = currentUid()
+
+        val registration = outgoingRequestsCollection(uid, scope)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    trySend(emptySet()).isSuccess
+                    return@addSnapshotListener
+                }
+
+                val ids = snapshot?.documents
+                    ?.mapNotNull { it.getString("toUid") }
+                    ?.toSet()
+                    ?: emptySet()
+
+                trySend(ids).isSuccess
             }
 
         awaitClose { registration.remove() }

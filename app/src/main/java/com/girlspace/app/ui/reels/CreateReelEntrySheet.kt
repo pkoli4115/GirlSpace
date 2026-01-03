@@ -47,7 +47,8 @@ fun CreateReelEntrySheet(
             Spacer(Modifier.height(8.dp))
 
             Text(
-                text = "Rules: 20s–180s allowed. ≤60s → Reel, 61–180s → Video.",
+                text = "Short videos & limited photos are available now.\n" +
+                        "More features unlock as the community grows 💗",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

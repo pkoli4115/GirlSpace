@@ -1,5 +1,5 @@
 package com.girlspace.app.ui.home
-
+import com.girlspace.app.ui.common.subtleGlow
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.collectAsState
@@ -8,9 +8,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.girlspace.app.ui.chat.ChatViewModel
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.IconButton
-import androidx.compose.ui.draw.clip
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
 import androidx.compose.ui.graphics.Color
 import com.google.firebase.auth.FirebaseAuth
@@ -29,7 +26,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.Home
@@ -37,7 +33,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material3.Divider
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -61,22 +57,32 @@ import com.girlspace.app.ui.chat.ChatsScreen   // ✅ use ChatsScreen here
 import com.girlspace.app.ui.feed.FeedScreen
 import com.girlspace.app.ui.groups.GroupsScreen
 import com.girlspace.app.ui.friends.FriendsScreen   // ✅ NEW IMPORT
+import androidx.navigation.compose.currentBackStackEntryAsState
+import androidx.compose.ui.res.painterResource
+import com.girlspace.app.R
+import com.girlspace.app.ui.common.AppTopBar
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import com.girlspace.app.ui.common.VibeMode
 
 // We keep "Feed" as the enum name for backward compatibility,
 // but this is effectively your "Home" tab.
 enum class HomeTab {
     Feed, Reels, Chats, Friends, Communities, Menu
 }
+private const val ROUTE_INNER_CIRCLE = "inner_circle_entry"
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun HomeRoot(
     navController: NavHostController,
-    onLogout: () -> Unit,            // used in Menu
-    onUpgrade: () -> Unit,           // used by Communities + Menu
-    onOpenProfile: () -> Unit,       // opens full ProfileScreen route (used in Menu)
-    onOpenChatFromFriends: (String) -> Unit   // NEW: friendUid → open chat
+    onLogout: () -> Unit,
+    onUpgrade: () -> Unit,
+    onOpenProfile: () -> Unit,
+    onOpenChatFromFriends: (String) -> Unit,
+    vibeMode: VibeMode
 ) {
+
 
     // 🔹 Start listening to plan limits once the user is in Home
     LaunchedEffect(Unit) {
@@ -88,6 +94,8 @@ fun HomeRoot(
     val chatVm: ChatViewModel = viewModel()
     val threads by chatVm.threads.collectAsState()
     val totalUnreadChats = remember(threads) { threads.sumOf { it.unreadCount } }
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
 
     val selectedColor = MaterialTheme.colorScheme.primary
     val unselectedColor = MaterialTheme.colorScheme.onSurfaceVariant
@@ -108,19 +116,18 @@ fun HomeRoot(
         }
     }
 
-    Scaffold(
-        topBar = {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.End
-            ) {
-                NotificationBell {
-                    navController.navigate("notifications")
-                }
-            }
-        },
+     Scaffold(
+         topBar = {
+             AppTopBar(
+                 title = "Togetherly",
+                 vibe = vibeMode,
+                 actions = {
+                     NotificationBell {
+                         navController.navigate("notifications")
+                     }
+                 }
+             )
+         },
         bottomBar = {
             NavigationBar {
                 // Feed (HOME)
@@ -215,6 +222,28 @@ fun HomeRoot(
                             contentDescription = "Communities",
                             tint = if (currentTab == HomeTab.Communities) selectedColor else unselectedColor
                         )
+                    },
+                    alwaysShowLabel = false
+                )
+// Inner Circle (full-screen entry / gate)
+                NavigationBarItem(
+                    selected = currentRoute == ROUTE_INNER_CIRCLE,
+                    onClick = {
+                        navController.navigate(ROUTE_INNER_CIRCLE)
+                    },
+                    icon = {
+                        Icon(
+                            painter = painterResource(id = R.drawable.inner),
+                            contentDescription = "Inner Circle",
+                            tint = Color.Unspecified,
+                            modifier = Modifier
+                                .size(26.dp)
+                                .subtleGlow(
+                                    glowColor = Color(0xFFE91E63) // soft pink / magenta
+                                )
+                        )
+
+
                     },
                     alwaysShowLabel = false
                 )
