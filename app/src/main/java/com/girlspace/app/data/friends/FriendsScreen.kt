@@ -51,6 +51,7 @@ import android.R.attr.enabled
 import coil.request.ImageRequest
 import com.girlspace.app.data.friends.FriendRequestItem
 import com.girlspace.app.data.friends.FriendUserSummary
+import androidx.compose.ui.draw.alpha
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -320,20 +321,22 @@ private fun FriendsTab(
             var menuExpanded by remember { mutableStateOf(false) }
             val isDisabled = disabledIds.contains(friend.uid)
             val isSelected = selectedIds.contains(friend.uid)
+            val isOwnerRow = selectionMode && disabledIds.contains(friend.uid)
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable {
+                    .alpha(if (isOwnerRow) 0.6f else 1f)
+                    .clickable(enabled = !isOwnerRow) {
                         if (selectionMode) {
                             if (!isDisabled) onToggleSelect(friend.uid)
                         } else {
                             onViewProfile(friend.uid)
                         }
                     }
-
                     .padding(vertical = 8.dp)
-            ) {
+            )
+            {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
@@ -357,8 +360,13 @@ private fun FriendsTab(
                             overflow = TextOverflow.Ellipsis
                         )
 
-                        // ✅ Add this hint UNDER the name, still inside the Column
-                        if (selectionMode && isDisabled) {
+                        if (isOwnerRow) {
+                            Text(
+                                text = "Group owner",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else if (selectionMode && isDisabled) {
                             Text(
                                 text = "Already in group",
                                 style = MaterialTheme.typography.labelSmall,
@@ -367,13 +375,14 @@ private fun FriendsTab(
                         }
                     }
 
+
 // ✅ Checkbox stays OUTSIDE the Column, exactly like your snippet
                     if (selectionMode) {
                         Checkbox(
                             checked = isSelected || isDisabled,
-                            enabled = !isDisabled,
+                            enabled = !isOwnerRow,
                             onCheckedChange = {
-                                if (!isDisabled) onToggleSelect(friend.uid)
+                                if (!isOwnerRow) onToggleSelect(friend.uid)
                             }
                         )
                     }

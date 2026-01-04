@@ -166,24 +166,25 @@ fun GroupsScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         items(groups) { group ->
+                            val scopeStr = if (scope == GroupsScope.INNER_CIRCLE) "inner" else "public"
+
                             GroupCard(
                                 group = group,
                                 onJoin = { viewModel.joinGroup(group) },
                                 onLeave = { viewModel.leaveGroup(group) },
+                                onOpenInfo = {
+                                    navController.navigate("group_info/${group.id}/$scopeStr")
+                                },
                                 onOpenChat = {
                                     val encoded = Uri.encode(group.name.ifBlank { "Group" })
                                     navController.navigate("group_chat/${group.id}/$encoded")
                                 },
                                 onAddMembers = {
-                                    // ✅ store pending groupId on this screen (receiver)
                                     handle?.set("pending_group_id", group.id)
-
-                                    val scopeStr =
-                                        if (scope == GroupsScope.INNER_CIRCLE) "inner" else "public"
-
                                     navController.navigate("add_members/${group.id}/$scopeStr")
                                 }
                             )
+
                         }
                     }
                 }
@@ -280,13 +281,15 @@ private fun GroupCard(
     group: GroupItem,
     onJoin: () -> Unit,
     onLeave: () -> Unit,
+    onOpenInfo: () -> Unit,
     onOpenChat: () -> Unit,
     onAddMembers: () -> Unit
-) {
+)
+ {
     Card(
         modifier = androidx.compose.ui.Modifier
             .fillMaxWidth()
-            .clickable { onOpenChat() },
+            .clickable { onOpenInfo() },
         shape = RoundedCornerShape(16.dp)
     ) {
         Column(androidx.compose.ui.Modifier.padding(14.dp)) {

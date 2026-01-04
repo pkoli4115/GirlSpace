@@ -1,4 +1,5 @@
 package com.girlspace.app.ui
+import com.girlspace.app.ui.groups.GroupInfoScreen
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.material3.AlertDialog
@@ -438,6 +439,30 @@ fun GirlSpaceApp(navController: androidx.navigation.NavHostController) {
                     onBack = { navController.popBackStack() }
                 )
             }
+            composable(
+                route = "group_info/{groupId}/{scope}",
+                arguments = listOf(
+                    navArgument("groupId") { type = NavType.StringType },
+                    navArgument("scope") { type = NavType.StringType }
+                )
+            ) { backStackEntry ->
+                val groupId =
+                    backStackEntry.arguments?.getString("groupId") ?: return@composable
+
+                val scopeStr =
+                    backStackEntry.arguments?.getString("scope") ?: "public"
+
+                val scope =
+                    if (scopeStr == "inner") com.girlspace.app.data.groups.GroupsScope.INNER_CIRCLE
+                    else com.girlspace.app.data.groups.GroupsScope.PUBLIC
+
+                GroupInfoScreen(
+                    navController = navController,
+                    groupId = groupId,
+                    scope = scope
+                )
+            }
+
 
             /* ---------------------------------------------------
                 9) 1-1 CHAT BY USER ID
